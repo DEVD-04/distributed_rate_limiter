@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: policy-service
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: 8090

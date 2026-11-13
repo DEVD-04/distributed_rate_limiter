@@ -1,0 +1,42 @@
+Functional req:
+1. limit rate of req based on user_id / API_key / IP
+2. Rules and attributes configurable at runtime
+3. give proper message when limit exceeds
+4. handle burst request
+5. support diff tier of user
+
+non-func:
+1. scalable
+2. high available than consistent
+3. low latency
+
+core entity:
+1. user
+2. rules
+3. req_counter
+
+HLD:
+1. where should rate limiter belong:
+	<clients>  <load balancer, API gateway>  <backend services>
+	why not in client side: though event gets triggered [maybe by clicking button] from client side so it is easy to put rate limiter on client side. But the code in client side can be exposed and hacked. if we put counter in local cache it can be edited by user.
+	why not in backend services: though it is logical to put rate limiter in backend service because there will be backend services for each feature [like image creation, text generation], so we can put customized rate limiter for that specific service. But for distributed systems there maybe multiple same type of backend service. so there will be multiple same type of rate limiter too for each backend instance. so the rate limiter counter needs to be synced across all servers in very small latency to get correct count. we can make the counter a global variable to solve this issue. 
+	so put rate limiter in load balancer, API gateway : 
+
+2. client --> Load balancer --> API gateway 
+inside api gateway : Auth check --> call rate limiter service --> if allowed go to backend service else error 429 to client
+
+3. for large distributed systems: there maybe multiple instance of <load balancer, API gateway>. that means there will be multiple rate limiter instances. So same sync problem of counter.
+so for this we need global cache/ storage unit :: want min latency : use cache (redis) 
+
+4. As we want configurable policy at runtime there will be ratelimiter_policy service and policy_db[relational postgres db] to store user_data. It will update redis cache to gain eventual consistency
+
+5. ratelimit_rules schema for policy db:
+rule_id, subject_type(user_id, api_key, IP, tier), subject_value, endpoint(url at which we want the rate limiter), algorithm, req_limit, window_size, burst_capacity, refill_rate, is_active, created_at, updated_at.
+
+6. Algorithms:
+a. fixed window counter: divide timeline with fixed time interval. but it cannot solve burst load problem and boundary-overshoot problem. if first wave of req comes at very end of nth window and the wave continues to second window, then for a very short time we are getting 2*limit requests.
+b. sliding window log:  window keeps rolling: on each request, drop timestamps older than now - window, then count what’s left. Memory is O(limit) per key. So for high-limit cases it causes more memory. Also every request needs scanning/evicting older entries, which can cause high computational cost. It fully solves boundary overshoot problem but cannot solve instant burst request[within limit] (leaky bucket does that). It is most accurate in terms of strictly limiting #req/window . So use it when accuracy matters more than cpu/memory cost. ex: login_attempt, payment_attempt. 
+c. sliding window counter: here assumption is requests are coming in uniform manner. so when a new request comes find weitage of prev winw and new window, if there any space left then accept the request else reject. 
+d. token bucket: 2 variables needed : max_capacity, refill_rate. when a req comes it checks if there is any token in bucket. if yes then the request served, else reject. next when refill_rate will add token, then the req will be served. Store tokens and last_refill_ts, and compute the refill lazily on each request: tokens = min(cap, tokens + (now - last) × rate). less accurate than sliding window. if max_limit is high, then burst request can overwhelm backend services. 
+e. leaky bucket: there will be a queue, with max capacity and drain rate. so whatever number of req can come to queue, the drain_rate [rate at which it goes to backend] is constant. So it completely solves burst request problem. but issue is if drain_rte is small or queue_length is large then last came valid request must wait for prev req to be finished. use it only when backend service demand a uniform rate of traffic. 
+there is another type of leaky bucket i.e. counter variant [similar as token bucket because token bucket lets a burst through when bucket has tokens and leaky-couonter allows when bucket empty]
