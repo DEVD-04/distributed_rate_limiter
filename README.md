@@ -18,8 +18,15 @@ records what is built, how to run it, and where the implementation departs from 
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
 
-Docker is not installed on the development machine, so no `docker-compose.yml` exists yet; Phase 2
-needs Redis, so Docker (or a native Redis) is required before then.
+Docker Desktop (engine 29.x) is installed on the development machine, and `redis:7-alpine` (Redis 7.4) is
+pulled. No `docker-compose.yml` exists yet; it is added with the later phases. For a local Redis configured as
+in the design (no persistence, `volatile-ttl` eviction):
+
+```
+docker run -d --name rl-redis -p 6379:6379 redis:7-alpine redis-server --save "" --appendonly no --maxmemory-policy volatile-ttl
+```
+
+Tests that need Redis will start their own container through Testcontainers, so they do not depend on this one.
 
 ## Layout
 
