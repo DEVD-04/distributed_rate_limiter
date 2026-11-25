@@ -24,6 +24,11 @@ public record Decision(
         return new Decision(true, limit, remaining, 0, resetMs, 0, Reason.ALLOWED);
     }
 
+    /** The limiter could not decide (shared store down); the request is let through. */
+    public static Decision failedOpen(long limit) {
+        return new Decision(true, limit, limit, 0, 0, 0, Reason.LIMITER_UNAVAILABLE);
+    }
+
     public static Decision rejected(long limit, long remaining, long retryAfterMs, long resetMs) {
         return new Decision(false, limit, remaining, retryAfterMs, resetMs, 0, Reason.LIMIT_EXCEEDED);
     }
