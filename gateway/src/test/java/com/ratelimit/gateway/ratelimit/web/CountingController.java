@@ -18,7 +18,8 @@ class CountingController {
         return counter == null ? 0 : counter.get();
     }
 
-    @RequestMapping({"/test/ip/**", "/test/user/**", "/test/keyed/**", "/test/open/**"})
+    @RequestMapping({"/test/ip/**", "/test/user/**", "/test/keyed/**", "/test/open/**",
+            "/test/local/**", "/test/window/**", "/test/leaky/**"})
     Map<String, String> handle(HttpServletRequest request) {
         HITS.computeIfAbsent(request.getRequestURI(), k -> new AtomicInteger()).incrementAndGet();
         return Map.of("status", "ok");

@@ -13,12 +13,15 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param resolutionCacheSize bound on the memoized rule lookups
  * @param maxKeys             bound on the number of limiter buckets held in memory; the oldest idle
  *                            ones go first when it is exceeded
+ * @param maxWaiting           how many leaky-bucket requests one node may hold waiting at once; more are
+ *                            turned away immediately
  */
 @ConfigurationProperties(prefix = "gateway.ratelimit")
 public record RulesProperties(
         @DefaultValue List<RuleEntry> rules,
         @DefaultValue("10000") long resolutionCacheSize,
-        @DefaultValue("100000") long maxKeys) {
+        @DefaultValue("100000") long maxKeys,
+        @DefaultValue("10000") int maxWaiting) {
 
     /** One configured rule. Blank {@code matchTier} / {@code matchSubject} / {@code httpMethod} mean "any". */
     public record RuleEntry(
