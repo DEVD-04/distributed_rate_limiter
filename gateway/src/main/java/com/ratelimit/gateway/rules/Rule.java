@@ -80,7 +80,8 @@ public record Rule(
         validateCombination(algorithm, mode);
         boolean paramsFit = switch (algorithm) {
             case TOKEN_BUCKET -> params instanceof TokenBucketParams;
-            case LEAKY_BUCKET_QUEUE, SLIDING_WINDOW_LOG -> false; // not implemented yet
+            case SLIDING_WINDOW_LOG -> params instanceof SlidingWindowParams;
+            case LEAKY_BUCKET_QUEUE -> false; // not implemented yet
         };
         if (!paramsFit) {
             throw new IllegalArgumentException(

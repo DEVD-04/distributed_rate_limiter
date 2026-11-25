@@ -4,11 +4,12 @@ import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.redis.LuaScript;
 import com.ratelimit.gateway.redis.RedisKeys;
-import com.ratelimit.gateway.rules.Algorithm;
 import com.ratelimit.gateway.rules.Rule;
+import com.ratelimit.gateway.rules.SlidingWindowParams;
 import com.ratelimit.gateway.rules.TokenBucketParams;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
@@ -55,6 +56,34 @@ public class StrictRedisLimiter implements RateLimiter {
             return {allowed, math.floor(tokens + 1e-9), retry, reset}
             """);
 
+    /**
+     * Sliding window log: a sorted set holding one entry (score = time in ms) per admitted request.
+     * An entry counts for exactly window_ms: it is dropped once score <= now - window.
+     * KEYS[1] the set; ARGV: window_ms, limit, unique member id.
+     * Returns {allowed, requests left, retry_after_ms, ms until the window is empty}.
+     */
+    static final LuaScript SLIDING_WINDOW = new LuaScript("sliding_window", """
+            local t = redis.call('TIME')
+            local now = t[1] * 1000 + math.floor(t[2] / 1000)
+            local window, limit = tonumber(ARGV[1]), tonumber(ARGV[2])
+            redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+            local count = redis.call('ZCARD', KEYS[1])
+            local allowed, retry = 0, 0
+            if count < limit then
+              redis.call('ZADD', KEYS[1], now, ARGV[3])
+              count = count + 1
+              allowed = 1
+            else
+              -- the oldest entry leaves the window at oldest + window; from then on there is room
+              local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+              retry = tonumber(oldest[2]) + window - now
+            end
+            redis.call('PEXPIRE', KEYS[1], window)
+            local newest = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')
+            local reset = tonumber(newest[2]) + window - now
+            return {allowed, limit - count, retry, reset}
+            """);
+
     private final StatefulRedisConnection<String, String> connection;
     private final AtomicLong lastFailureLogNanos = new AtomicLong(System.nanoTime() - LOG_INTERVAL_NANOS);
 
@@ -64,12 +93,18 @@ public class StrictRedisLimiter implements RateLimiter {
 
     @Override
     public Decision acquire(Rule rule, String key, int cost) {
-        if (rule.algorithm() != Algorithm.TOKEN_BUCKET) {
-            throw new UnsupportedOperationException("Redis limiter does not support " + rule.algorithm() + " yet");
-        }
         if (cost < 1) {
             throw new IllegalArgumentException("cost must be at least 1, was " + cost);
         }
+        return switch (rule.algorithm()) {
+            case TOKEN_BUCKET -> tokenBucket(rule, key, cost);
+            case SLIDING_WINDOW_LOG -> slidingWindow(rule, key, cost);
+            case LEAKY_BUCKET_QUEUE ->
+                    throw new UnsupportedOperationException("Redis limiter does not support " + rule.algorithm() + " yet");
+        };
+    }
+
+    private Decision tokenBucket(Rule rule, String key, int cost) {
         TokenBucketParams params = (TokenBucketParams) rule.params();
         long units = (long) params.cost() * cost;
         if (units > params.capacity()) {
@@ -77,25 +112,52 @@ public class StrictRedisLimiter implements RateLimiter {
                     "request cost " + units + " exceeds capacity " + params.capacity() + " of rule " + rule.name());
         }
 
-        List<Long> result;
-        try {
-            result = TOKEN_BUCKET.run(connection,
-                    List.of(RedisKeys.of(rule.ruleId(), key, "tb")),
-                    Long.toString(params.capacity()),
-                    Double.toString(params.refillPerSec()),
-                    Long.toString(units),
-                    Long.toString(keyTtlMillis(params)));
-        } catch (RuntimeException e) {
-            logFailure(rule, e);
+        List<Long> result = run(rule, TOKEN_BUCKET,
+                List.of(RedisKeys.of(rule.ruleId(), key, "tb")),
+                Long.toString(params.capacity()),
+                Double.toString(params.refillPerSec()),
+                Long.toString(units),
+                Long.toString(keyTtlMillis(params)));
+        if (result == null) {
             return Decision.failedOpen(params.capacity());
         }
+        return toDecision(params.capacity(), result);
+    }
 
+    private Decision slidingWindow(Rule rule, String key, int cost) {
+        SlidingWindowParams params = (SlidingWindowParams) rule.params();
+        if (cost != 1) {
+            throw new IllegalArgumentException("a sliding window counts requests, so cost must be 1, was " + cost);
+        }
+
+        List<Long> result = run(rule, SLIDING_WINDOW,
+                List.of(RedisKeys.of(rule.ruleId(), key, "sw")),
+                Long.toString(params.windowMs()),
+                Long.toString(params.limit()),
+                Long.toHexString(ThreadLocalRandom.current().nextLong())); // short unique id: memory is O(limit)
+        if (result == null) {
+            return Decision.failedOpen(params.limit());
+        }
+        return toDecision(params.limit(), result);
+    }
+
+    private static Decision toDecision(long limit, List<Long> result) {
         long remaining = result.get(1);
         long resetMs = result.get(3);
         if (result.get(0) == 1) {
-            return Decision.allowed(params.capacity(), remaining, resetMs);
+            return Decision.allowed(limit, remaining, resetMs);
         }
-        return Decision.rejected(params.capacity(), remaining, Math.max(1, result.get(2)), resetMs);
+        return Decision.rejected(limit, remaining, Math.max(1, result.get(2)), resetMs);
+    }
+
+    /** @return the script result, or {@code null} if Redis could not be reached (already logged) */
+    private List<Long> run(Rule rule, LuaScript script, List<String> keys, String... args) {
+        try {
+            return script.run(connection, keys, args);
+        } catch (RuntimeException e) {
+            logFailure(rule, e);
+            return null;
+        }
     }
 
     /** An idle bucket is dropped once it would have refilled completely twice over, plus a second. */

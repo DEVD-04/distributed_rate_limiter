@@ -62,6 +62,26 @@ class RuleTests {
     }
 
     @Test
+    void aSlidingWindowRuleIsAcceptedOnlyInStrictMode() {
+        Rule strict = new Rule(1, "sw", LimitBy.USER, null, null, "/a", null, Algorithm.SLIDING_WINDOW_LOG, Mode.STRICT,
+                FailureMode.LOCAL_FALLBACK, new SlidingWindowParams(5, 1000), 0, 1);
+        assertThat(strict.algorithm()).isEqualTo(Algorithm.SLIDING_WINDOW_LOG);
+        assertThatThrownBy(() -> new Rule(1, "sw", LimitBy.USER, null, null, "/a", null, Algorithm.SLIDING_WINDOW_LOG,
+                Mode.LOCAL_SYNC, FailureMode.LOCAL_FALLBACK, new SlidingWindowParams(5, 1000), 0, 1))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("STRICT");
+    }
+
+    @Test
+    void paramsMustMatchTheAlgorithm() {
+        assertThatThrownBy(() -> new Rule(1, "x", LimitBy.USER, null, null, "/a", null, Algorithm.SLIDING_WINDOW_LOG,
+                Mode.STRICT, FailureMode.LOCAL_FALLBACK, new TokenBucketParams(5, 1), 0, 1))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("do not fit");
+        assertThatThrownBy(() -> new Rule(1, "x", LimitBy.USER, null, null, "/a", null, Algorithm.TOKEN_BUCKET,
+                Mode.STRICT, FailureMode.LOCAL_FALLBACK, new SlidingWindowParams(5, 1000), 0, 1))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("do not fit");
+    }
+
+    @Test
     void allOtherCombinationsAreValid() {
         Rule.validateCombination(Algorithm.SLIDING_WINDOW_LOG, Mode.STRICT);
         Rule.validateCombination(Algorithm.TOKEN_BUCKET, Mode.STRICT);

@@ -72,10 +72,26 @@ class ParamsFactoryTests {
     }
 
     @Test
+    void parsesSlidingWindowParams() {
+        assertThat(ParamsFactory.parse(Algorithm.SLIDING_WINDOW_LOG, Map.of("limit", "5", "window_ms", "1000")))
+                .isEqualTo(new SlidingWindowParams(5, 1000));
+        assertThat(ParamsFactory.parse(Algorithm.SLIDING_WINDOW_LOG, Map.of("limit", "5", "window-ms", "1000")))
+                .isEqualTo(new SlidingWindowParams(5, 1000));
+    }
+
+    @Test
+    void slidingWindowRejectsTyposMissingKeysAndBadValues() {
+        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.SLIDING_WINDOW_LOG, Map.of("limit", "5", "windo_ms", "1000")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("windo_ms");
+        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.SLIDING_WINDOW_LOG, Map.of("limit", "5")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("window_ms");
+        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.SLIDING_WINDOW_LOG, Map.of("limit", "0", "window_ms", "1000")))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void algorithmsNotImplementedYetAreRejected() {
         assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of()))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("not implemented");
-        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.SLIDING_WINDOW_LOG, Map.of()))
-                .isInstanceOf(IllegalArgumentException.class);
     }
 }
