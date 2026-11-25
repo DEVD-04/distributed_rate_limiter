@@ -8,4 +8,10 @@ dependencies {
 
     // Bounded, expiring in-memory state (version managed by the Spring Boot BOM).
     implementation("com.github.ben-manes.caffeine:caffeine")
+
+    // Redis client for STRICT mode (version managed by the Spring Boot BOM).
+    implementation("io.lettuce:lettuce-core")
+
+    // Real Redis in tests, started in Docker.
+    testImplementation("org.testcontainers:junit-jupiter")
 }
