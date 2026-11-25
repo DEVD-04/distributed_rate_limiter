@@ -4,6 +4,8 @@ package com.ratelimit.gateway.ratelimit.api;
 public enum Reason {
     ALLOWED,
     LIMIT_EXCEEDED,
+    /** The leaky bucket queue was full (or the node had too many waiting requests), so the request was turned away. */
+    QUEUE_FULL,
     /** The shared store could not be reached, so the request was let through (until failure modes exist). */
     LIMITER_UNAVAILABLE
 }

@@ -2,6 +2,7 @@ package com.ratelimit.gateway.ratelimit;
 
 import com.ratelimit.gateway.rules.Algorithm;
 import com.ratelimit.gateway.rules.FailureMode;
+import com.ratelimit.gateway.rules.LeakyBucketParams;
 import com.ratelimit.gateway.rules.LimitBy;
 import com.ratelimit.gateway.rules.Mode;
 import com.ratelimit.gateway.rules.Rule;
@@ -12,6 +13,12 @@ import com.ratelimit.gateway.rules.TokenBucketParams;
 public final class TestRules {
 
     private TestRules() {
+    }
+
+    public static Rule leakyBucket(long ruleId, double drainPerSec, long queueCapacity) {
+        return new Rule(ruleId, "rule-" + ruleId, LimitBy.USER, null, null, "/api/**", null,
+                Algorithm.LEAKY_BUCKET_QUEUE, Mode.STRICT, FailureMode.LOCAL_FALLBACK,
+                new LeakyBucketParams(drainPerSec, queueCapacity), 0, 1);
     }
 
     public static Rule slidingWindow(long ruleId, long limit, long windowMs) {

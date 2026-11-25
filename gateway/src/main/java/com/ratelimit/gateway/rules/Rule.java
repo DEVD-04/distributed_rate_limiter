@@ -81,7 +81,7 @@ public record Rule(
         boolean paramsFit = switch (algorithm) {
             case TOKEN_BUCKET -> params instanceof TokenBucketParams;
             case SLIDING_WINDOW_LOG -> params instanceof SlidingWindowParams;
-            case LEAKY_BUCKET_QUEUE -> false; // not implemented yet
+            case LEAKY_BUCKET_QUEUE -> params instanceof LeakyBucketParams;
         };
         if (!paramsFit) {
             throw new IllegalArgumentException(

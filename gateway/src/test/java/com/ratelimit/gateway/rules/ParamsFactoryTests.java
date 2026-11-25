@@ -90,8 +90,20 @@ class ParamsFactoryTests {
     }
 
     @Test
-    void algorithmsNotImplementedYetAreRejected() {
-        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of()))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("not implemented");
+    void parsesLeakyBucketParams() {
+        assertThat(ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of("drain_per_sec", "10", "queue_capacity", "20")))
+                .isEqualTo(new LeakyBucketParams(10, 20));
+        assertThat(ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of("drain-per-sec", "2.5", "queue-capacity", "5")))
+                .isEqualTo(new LeakyBucketParams(2.5, 5));
+    }
+
+    @Test
+    void leakyBucketRejectsTyposMissingKeysAndBadValues() {
+        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of("drain_per_sec", "10", "queue_size", "20")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("queue_size");
+        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of("drain_per_sec", "10")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("queue_capacity");
+        assertThatThrownBy(() -> ParamsFactory.parse(Algorithm.LEAKY_BUCKET_QUEUE, Map.of("drain_per_sec", "0", "queue_capacity", "5")))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

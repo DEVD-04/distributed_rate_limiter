@@ -29,6 +29,16 @@ public record Decision(
         return new Decision(true, limit, limit, 0, 0, 0, Reason.LIMITER_UNAVAILABLE);
     }
 
+    /** Turned away because the leaky bucket queue is full; {@code retryAfterMs} is when it will have room. */
+    public static Decision queueFull(long limit, long retryAfterMs, long resetMs) {
+        return new Decision(false, limit, 0, retryAfterMs, resetMs, 0, Reason.QUEUE_FULL);
+    }
+
+    /** Admitted after being held {@code waitedMs} by the leaky bucket queue. */
+    public static Decision allowedAfterWait(long limit, long remaining, long resetMs, long waitedMs) {
+        return new Decision(true, limit, remaining, 0, resetMs, waitedMs, Reason.ALLOWED);
+    }
+
     public static Decision rejected(long limit, long remaining, long retryAfterMs, long resetMs) {
         return new Decision(false, limit, remaining, retryAfterMs, resetMs, 0, Reason.LIMIT_EXCEEDED);
     }

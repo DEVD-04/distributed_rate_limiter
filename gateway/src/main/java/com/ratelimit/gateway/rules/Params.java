@@ -1,8 +1,8 @@
 package com.ratelimit.gateway.rules;
 
 /**
- * Algorithm-specific parameters of a rule (the {@code params} JSON column). The token bucket and the
- * sliding window log exist so far; the leaky bucket variant is added with its algorithm.
+ * Algorithm-specific parameters of a rule (the {@code params} JSON column). All three algorithms exist:
+ * token bucket, sliding window log and leaky bucket (queue variant).
  */
-public sealed interface Params permits TokenBucketParams, SlidingWindowParams {
+public sealed interface Params permits TokenBucketParams, SlidingWindowParams, LeakyBucketParams {
 }

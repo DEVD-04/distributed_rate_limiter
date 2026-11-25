@@ -21,9 +21,13 @@ public final class ParamsFactory {
         return switch (algorithm) {
             case TOKEN_BUCKET -> tokenBucket(params);
             case SLIDING_WINDOW_LOG -> slidingWindow(params);
-            case LEAKY_BUCKET_QUEUE ->
-                    throw new IllegalArgumentException("algorithm " + algorithm + " is not implemented yet");
+            case LEAKY_BUCKET_QUEUE -> leakyBucket(params);
         };
+    }
+
+    private static Params leakyBucket(Map<String, String> params) {
+        rejectUnknown(params, Set.of("drain_per_sec", "queue_capacity"));
+        return new LeakyBucketParams(requireDouble(params, "drain_per_sec"), requireLong(params, "queue_capacity"));
     }
 
     private static Params slidingWindow(Map<String, String> params) {
