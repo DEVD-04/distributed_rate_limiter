@@ -2,7 +2,8 @@
 
 A Spring Boot API gateway that authenticates requests (RS256 JWT or API key), rate-limits them per
 user / API key / IP with per-endpoint, per-tier rules, and proxies them to downstream services. Limits
-can be exact across several gateway nodes (STRICT mode, Redis + Lua) or local to a node.
+can be exact across several gateway nodes (STRICT mode, Redis + Lua) or local to a node. Rules and API
+keys are managed through a policy service and reach running gateways without a restart.
 
 The full design is in `Distributed Rate Limiter & API Gateway Design Document.docx`. This file
 records what is built, how to run it, and where the implementation departs from or adds to the design.
@@ -13,7 +14,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-7 of 8 done (`rules-core`, database, admin API, publishing to Redis, gateways load rules and API keys and follow changes) |
+| **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -77,7 +78,17 @@ curl -i -H 'X-API-Key: my-secret-key' http://localhost:8080/api/images/cat.png
 ```
 
 Leave out `--gateway.redis.url` to run everything in memory. To run several gateways against the same
-Redis, give each its own `--server.port`.
+Redis, give each its own `--server.port`, and, if they share a working directory, its own
+`--gateway.ratelimit.snapshot-file`.
+
+**With the policy service running** (below), its published configuration replaces the rules *and the API keys*
+in a gateway's own configuration, so the `my-secret-key` above stops working. Create keys through the admin
+API instead:
+
+```
+curl -H "X-Admin-Token: $POLICY_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  http://localhost:8090/admin/api-keys -d '{"userId":"demo","tier":"free"}'     # the key is shown once
+```
 
 Mock-service knobs (environment variables): `MOCK_LATENCY_MS`, `MOCK_LATENCY_JITTER_MS`, `MOCK_ERROR_RATE`, `MOCK_ERROR_STATUS`, `MOCK_INSTANCE_ID`.
 
@@ -276,11 +287,33 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
   Two such calls per request mean the 10 ms p99 target is **not yet proven under sustained 2k–5k req/s**: that needs a load
   tool (Phase 7). If it fails, the cheap fixes are making the IP stage `LOCAL_SYNC` (halving Redis calls) or a small
   connection pool.
+- **Rule changes under load (Phase 3), 3 gateway processes, 300 requests/s between them, two runs:** each limit change
+  made through the admin API was in use on all three gateways 53–217 ms after the admin request was sent
+  (target: 2 s). No gateway served the old limit after switching, and no request failed.
+- **Redis and PostgreSQL stopped for about 12 s under that load:** no request failed in either run. In the second,
+  all 3,171 requests sent while both were fully down succeeded under the last published rules, but unchecked
+  (fail-open), with p99 5.7 ms (21.8 ms in the first run). Limits were enforced again about 1.5 s after Redis was told
+  to start. A limit lowered to 100 afterwards admitted exactly **100** across the cluster, in both runs.
+- **Warm gateways under that load:** p50 5.6 ms / p99 10.0 ms end to end (including the mock service), and 0 of 5,704
+  requests unchecked.
+- **Cold gateways are not exact** (see the limitation below).
 - Measurement note: on Windows a sleeping thread wakes on a ~15 ms timer tick, so a load generator that sleeps between
   calls inflates latency by that much. The benchmark spins instead.
 
 ## Known limitations
 
+- **A freshly started gateway under immediate load lets some requests through unchecked, even with Redis healthy.**
+  While the JVM warms up, Redis calls can exceed the 15 ms command timeout, and a failed call is let through.
+  Measured on the laptop at 300 requests/s over three just-started gateways: in one run 172 of 1,200 requests in
+  the first 4 s were unchecked (p99 959 ms); in another, with the load applied steadily, 18 of about 1,500 in the
+  first 5 s; after that, none. So `STRICT` is exact only once warm. Phase 5's `LOCAL_FALLBACK` would keep limiting
+  such requests locally; warming a node before it takes traffic, or a longer timeout, would reduce them.
+- While gateways are switching to a new rule (a few milliseconds apart in the measured runs), one may still apply
+  the old parameters to the same Redis bucket another is already treating with the new ones.
+- The admin API has no TLS and one shared token, so changes cannot be attributed to a person. Keep it off
+  untrusted networks.
+- During a Redis outage a revoked API key keeps working, and a rule made invalid by editing the database directly
+  blocks all publishing, revocations included (details under "API keys" and "Publishing to Redis").
 - **If Redis is unreachable the request is let through** and an error is logged (at most every 10 s), with decision reason
   `LIMITER_UNAVAILABLE`. This is a stop-gap: per-rule `failure_mode` (FAIL_OPEN / FAIL_CLOSED / LOCAL_FALLBACK) and the
   circuit breaker arrive in Phase 5. `failure_mode` is validated and stored but nothing acts on it yet.
@@ -296,8 +329,9 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
 - Real Tomcat answers TRACE with an empty 405 before the guard filter sees it; the guard's JSON 405 is covered by MockMvc tests only.
 - No `docker-compose.yml` yet; it arrives with the later phases (Postgres, policy service, Prometheus, Grafana).
 
-## Next: Phase 3 (rules)
+## Next: Phase 4 (LOCAL_SYNC)
 
-PostgreSQL schema (Flyway), the policy service (admin API with per-algorithm validation), the active rule snapshot written
-to Redis with a version, pub/sub plus version polling so every gateway reloads and swaps its rule set atomically, a local
-snapshot file for startup without Redis, and the live-state behavior on rule changes. Needs PostgreSQL (Docker).
+Token leasing for `LOCAL_SYNC` token bucket rules: local buckets refilled by an atomic lease script in Redis, sized
+to each node's demand, node membership by heartbeat, and tests that the cluster never admits more than
+`capacity + refill × time`, including with all of one key's traffic on one node. It replaces today's per-node
+counting, under which N nodes admit up to N × the limit.
