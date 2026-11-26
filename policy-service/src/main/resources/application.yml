@@ -19,6 +19,12 @@ spring:
 # the service refuses to start without it.
 policy:
   admin-token: ${POLICY_ADMIN_TOKEN:}
+  # Where the configuration is published for gateways. Empty turns publishing off.
+  redis:
+    url: ${POLICY_REDIS_URL:redis://localhost:6379}
+  publish:
+    # How often Redis is checked against the database (changes are also published immediately).
+    reconcile-interval: 5s
 
 server:
   port: 8090

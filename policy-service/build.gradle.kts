@@ -4,6 +4,8 @@ dependencies {
     implementation(project(":rules-core"))
 
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
+    // Publishing the configuration to Redis (version managed by the Spring Boot BOM).
+    implementation("io.lettuce:lettuce-core")
     // Schema migrations (versions managed by the Spring Boot BOM).
     implementation("org.flywaydb:flyway-core")
     runtimeOnly("org.flywaydb:flyway-database-postgresql")

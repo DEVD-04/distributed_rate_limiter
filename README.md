@@ -13,7 +13,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1 (`rules-core`), 2 (database) and 3 (admin API) of 8 |
+| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-4 of 8 done (`rules-core`, database, admin API, publishing to Redis) |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -26,7 +26,7 @@ records what is built, how to run it, and where the implementation departs from 
 | `rules-core` | library | Rule model, parameter validation and precedence matching (`com.ratelimit.rules`), shared so the policy service validates exactly what the gateway applies |
 | `gateway` | 8080 | Filters, auth, rate limiting, proxy |
 | `mock-service` | 8081… | Downstream stand-in with configurable latency / error rate |
-| `policy-service` | 8090 | Admin API for rules and API keys, backed by PostgreSQL (Flyway); publishing to gateways comes next in Phase 3 |
+| `policy-service` | 8090 | Admin API for rules and API keys, backed by PostgreSQL (Flyway); publishes the configuration to Redis |
 
 Gateway request pipeline (servlet filters, in order):
 `RequestIdFilter` → `RequestGuardFilter` → `ClientIpFilter` → `PreAuthRateLimitFilter` (by IP) →
@@ -88,8 +88,8 @@ dev issuer before load testing.
 ### Policy service and its database
 
 The policy service needs PostgreSQL. Flyway creates the schema and seeds it at startup (three tiers, the
-two per-stage default rules and the three sample rules). Nothing reads from it yet: until Phase 3 is
-finished the gateway still takes its rules from `application.yml`.
+two per-stage default rules and the three sample rules). It publishes to Redis, but gateways do not load
+that copy yet: until Phase 3 is finished they still take their rules from `application.yml`.
 
 ```
 docker run -d --name rl-postgres -p 5432:5432 -e POSTGRES_DB=ratelimit -e POSTGRES_USER=ratelimit \
@@ -101,7 +101,8 @@ java -jar policy-service/build/libs/policy-service-0.1.0-SNAPSHOT.jar
 ```
 
 Settings: `POLICY_DB_URL` (default `jdbc:postgresql://localhost:5432/ratelimit`), `POLICY_DB_USER` (default
-`ratelimit`), `POLICY_DB_PASSWORD` and `POLICY_ADMIN_TOKEN` (no defaults; the service will not start without a token).
+`ratelimit`), `POLICY_DB_PASSWORD` and `POLICY_ADMIN_TOKEN` (no defaults; the service will not start without a token),
+`POLICY_REDIS_URL` (default `redis://localhost:6379`; empty turns publishing off).
 
 #### Admin API
 
@@ -116,7 +117,7 @@ untrusted networks.
 | `DELETE /admin/rules/{id}` | Deactivate (rules are never deleted) |
 | `POST /admin/api-keys` | Body `userId`, `tier`. The key is generated and shown **once**; only its SHA-256 is stored |
 | `GET /admin/api-keys`, `DELETE /admin/api-keys/{keyHash}` | List (hashes only), revoke |
-| `GET /admin/version` | The configuration version; every change that saves anything raises it by one |
+| `GET /admin/version` | `version` (every change that saves anything raises it by one) and `publishedVersion` (what Redis holds; null if it cannot be reached) |
 
 ```
 curl -H "X-Admin-Token: $POLICY_ADMIN_TOKEN" -H 'Content-Type: application/json' http://localhost:8090/admin/rules \
@@ -127,6 +128,28 @@ A change is applied in one transaction: it locks the configuration, writes the r
 rule set with the same code a gateway uses, and only then raises the version. Errors: 400 invalid (with the
 reason; unknown fields and parameters are rejected), 404 unknown id, 409 another active rule has the same scope.
 `LOCAL_SYNC` is accepted only for the token bucket until the leasing phase.
+
+#### Publishing to Redis
+
+Gateways will load the configuration from Redis (step 5), never from PostgreSQL.
+
+- **Where:** the hash `rl:rules` holds `version` and `snapshot`; each publish sends the version on `rl:rules:updates`.
+  The design had two keys; one hash means a version can never be read next to the wrong snapshot. It has no TTL.
+- **What:** one JSON document with all active rules and all active API keys (hashes only). Its format is defined
+  in `rules-core` (`SnapshotCodec`), which also decodes it: any invalid rule rejects the whole snapshot.
+- **When:** right after a change commits, and every 5 s the service compares Redis with the database by content
+  and rewrites it if they differ. That covers a failed publish, Redis restarting empty, a damaged or hand-edited
+  value, and a restored database.
+- **Safety:** the database is read at one instant (`REPEATABLE READ`). The write is one Lua script that refuses to
+  replace a newer version with an older one. The admin API works while Redis is down.
+- **Threading:** publishing runs on its own thread. Done on the request thread just after commit, each request
+  would hold one database connection while waiting for a second; more simultaneous changes than the pool size
+  deadlocked until timeout (found by a test with concurrent changes).
+- **Measured** (one laptop): a change reached Redis within 0.2 s; after a Redis restart the copy was back in 3.3 s;
+  after a Redis outage the pending change was published 5.7 s after Redis started.
+- **Limitation:** if a stored rule is made invalid by editing the database directly, nothing new is published
+  (including key revocations) until it is fixed or deactivated. The service logs an error and
+  `publishedVersion` falls behind. The admin API itself cannot create such a rule.
 
 ## Configuration (`gateway/src/main/resources/application.yml`)
 

@@ -9,4 +9,7 @@ dependencies {
 
     // Bounded cache of resolved rule candidates.
     implementation("com.github.ben-manes.caffeine:caffeine")
+
+    // The JSON form of the configuration snapshot the policy service publishes and gateways load.
+    implementation("com.fasterxml.jackson.core:jackson-databind")
 }

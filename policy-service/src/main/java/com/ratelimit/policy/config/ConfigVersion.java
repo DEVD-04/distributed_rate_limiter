@@ -1,5 +1,6 @@
 package com.ratelimit.policy.config;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
@@ -12,9 +13,11 @@ import org.springframework.stereotype.Repository;
 public class ConfigVersion {
 
     private final JdbcClient jdbc;
+    private final ApplicationEventPublisher events;
 
-    public ConfigVersion(JdbcClient jdbc) {
+    public ConfigVersion(JdbcClient jdbc, ApplicationEventPublisher events) {
         this.jdbc = jdbc;
+        this.events = events;
     }
 
     public long current() {
@@ -26,7 +29,11 @@ public class ConfigVersion {
         jdbc.sql("SELECT version FROM config_version FOR UPDATE").query(Long.class).single();
     }
 
+    /** Records that the configuration changed: the one place every change goes through. */
     public long bump() {
-        return jdbc.sql("UPDATE config_version SET version = version + 1 RETURNING version").query(Long.class).single();
+        long version = jdbc.sql("UPDATE config_version SET version = version + 1 RETURNING version")
+                .query(Long.class).single();
+        events.publishEvent(new ConfigChangedEvent(version));
+        return version;
     }
 }
