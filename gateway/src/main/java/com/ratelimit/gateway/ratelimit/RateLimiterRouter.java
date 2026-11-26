@@ -2,7 +2,6 @@ package com.ratelimit.gateway.ratelimit;
 
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
-import com.ratelimit.rules.Algorithm;
 import com.ratelimit.rules.Mode;
 import com.ratelimit.rules.Rule;
 import java.util.ArrayList;
@@ -44,7 +43,7 @@ public class RateLimiterRouter implements RateLimiter {
     public static List<String> unservable(Collection<Rule> rules, boolean redisAvailable) {
         List<String> problems = new ArrayList<>();
         for (Rule rule : rules) {
-            if (servedByRedis(rule, redisAvailable) || rule.algorithm() == Algorithm.TOKEN_BUCKET) {
+            if (servedByRedis(rule, redisAvailable) || Rule.servableInMemory(rule.algorithm())) {
                 continue; // Redis handles every algorithm; the in-memory limiter handles the token bucket
             }
             if (rule.mode() == Mode.STRICT) {

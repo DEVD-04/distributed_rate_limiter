@@ -1,6 +1,7 @@
 package com.ratelimit.rules;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -23,6 +24,35 @@ public final class ParamsFactory {
             case SLIDING_WINDOW_LOG -> slidingWindow(params);
             case LEAKY_BUCKET_QUEUE -> leakyBucket(params);
         };
+    }
+
+    /**
+     * The reverse of {@link #parse}: typed params as the canonical (snake_case) keys and numbers that are
+     * stored in the database and published to gateways.
+     */
+    public static Map<String, Number> toMap(Params params) {
+        Map<String, Number> map = new LinkedHashMap<>();
+        switch (params) {
+            case TokenBucketParams p -> {
+                map.put("capacity", p.capacity());
+                map.put("refill_per_sec", plain(p.refillPerSec()));
+                map.put("cost", p.cost());
+            }
+            case SlidingWindowParams p -> {
+                map.put("limit", p.limit());
+                map.put("window_ms", p.windowMs());
+            }
+            case LeakyBucketParams p -> {
+                map.put("drain_per_sec", plain(p.drainPerSec()));
+                map.put("queue_capacity", p.queueCapacity());
+            }
+        }
+        return map;
+    }
+
+    /** A whole rate is written as 5, not 5.0. */
+    private static Number plain(double value) {
+        return value == Math.rint(value) && Math.abs(value) < 1e15 ? (Number) (long) value : (Number) value;
     }
 
     private static Params leakyBucket(Map<String, String> params) {

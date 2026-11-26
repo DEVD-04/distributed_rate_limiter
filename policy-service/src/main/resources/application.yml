@@ -10,6 +10,15 @@ spring:
     url: ${POLICY_DB_URL:jdbc:postgresql://localhost:5432/ratelimit}
     username: ${POLICY_DB_USER:ratelimit}
     password: ${POLICY_DB_PASSWORD:}
+  jackson:
+    deserialization:
+      # A misspelled field ("prioritty") must fail loudly instead of silently taking the default.
+      fail-on-unknown-properties: true
+
+# Every admin request must send this in X-Admin-Token. No default: set POLICY_ADMIN_TOKEN (16+ characters);
+# the service refuses to start without it.
+policy:
+  admin-token: ${POLICY_ADMIN_TOKEN:}
 
 server:
   port: 8090

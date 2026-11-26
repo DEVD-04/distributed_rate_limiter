@@ -22,7 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
  * The migrations against a real PostgreSQL: what they create, what they seed, and what the database
  * itself refuses. Tests that write successfully are transactional, so they roll back.
  */
-@SpringBootTest
+@SpringBootTest(properties = "policy.admin-token=test-admin-token-0123456789")
 @Import(PostgresTestSupport.class)
 class SchemaAndSeedTests {
 

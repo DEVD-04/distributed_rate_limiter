@@ -13,7 +13,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1 (`rules-core`) and 2 (database) of 8 |
+| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1 (`rules-core`), 2 (database) and 3 (admin API) of 8 |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -26,7 +26,7 @@ records what is built, how to run it, and where the implementation departs from 
 | `rules-core` | library | Rule model, parameter validation and precedence matching (`com.ratelimit.rules`), shared so the policy service validates exactly what the gateway applies |
 | `gateway` | 8080 | Filters, auth, rate limiting, proxy |
 | `mock-service` | 8081… | Downstream stand-in with configurable latency / error rate |
-| `policy-service` | 8090 | Owns the PostgreSQL schema and seed data (Flyway); the admin API and publishing come next in Phase 3 |
+| `policy-service` | 8090 | Admin API for rules and API keys, backed by PostgreSQL (Flyway); publishing to gateways comes next in Phase 3 |
 
 Gateway request pipeline (servlet filters, in order):
 `RequestIdFilter` → `RequestGuardFilter` → `ClientIpFilter` → `PreAuthRateLimitFilter` (by IP) →
@@ -95,11 +95,38 @@ finished the gateway still takes its rules from `application.yml`.
 docker run -d --name rl-postgres -p 5432:5432 -e POSTGRES_DB=ratelimit -e POSTGRES_USER=ratelimit \
   -e POSTGRES_PASSWORD=local-dev-only postgres:17-alpine
 ./gradlew :policy-service:bootJar
-POLICY_DB_PASSWORD=local-dev-only java -jar policy-service/build/libs/policy-service-0.1.0-SNAPSHOT.jar
+export POLICY_DB_PASSWORD=local-dev-only
+export POLICY_ADMIN_TOKEN=$(openssl rand -hex 24)    # required, 16+ characters
+java -jar policy-service/build/libs/policy-service-0.1.0-SNAPSHOT.jar
 ```
 
 Settings: `POLICY_DB_URL` (default `jdbc:postgresql://localhost:5432/ratelimit`), `POLICY_DB_USER` (default
-`ratelimit`), `POLICY_DB_PASSWORD` (no default).
+`ratelimit`), `POLICY_DB_PASSWORD` and `POLICY_ADMIN_TOKEN` (no defaults; the service will not start without a token).
+
+#### Admin API
+
+Every request needs `X-Admin-Token: <token>`, whatever the path. There is no TLS yet, so keep port 8090 off
+untrusted networks.
+
+| Request | Effect |
+|---|---|
+| `GET /admin/rules`, `GET /admin/rules/{id}` | All rules, including deactivated ones |
+| `POST /admin/rules` | Create (201). Body: `name`, `limitBy`, `endpointPattern`, `algorithm`, `params`; optional `matchTier`, `matchSubject`, `httpMethod`, `mode`, `failureMode`, `priority`, `active` |
+| `PUT /admin/rules/{id}` | **Replace** the whole rule: omitted optional fields return to their defaults |
+| `DELETE /admin/rules/{id}` | Deactivate (rules are never deleted) |
+| `POST /admin/api-keys` | Body `userId`, `tier`. The key is generated and shown **once**; only its SHA-256 is stored |
+| `GET /admin/api-keys`, `DELETE /admin/api-keys/{keyHash}` | List (hashes only), revoke |
+| `GET /admin/version` | The configuration version; every change that saves anything raises it by one |
+
+```
+curl -H "X-Admin-Token: $POLICY_ADMIN_TOKEN" -H 'Content-Type: application/json' http://localhost:8090/admin/rules \
+  -d '{"name":"search","limitBy":"USER","endpointPattern":"/api/search/**","algorithm":"TOKEN_BUCKET","params":{"capacity":7,"refill_per_sec":0.5}}'
+```
+
+A change is applied in one transaction: it locks the configuration, writes the row, builds the complete active
+rule set with the same code a gateway uses, and only then raises the version. Errors: 400 invalid (with the
+reason; unknown fields and parameters are rejected), 404 unknown id, 409 another active rule has the same scope.
+`LOCAL_SYNC` is accepted only for the token bucket until the leasing phase.
 
 ## Configuration (`gateway/src/main/resources/application.yml`)
 

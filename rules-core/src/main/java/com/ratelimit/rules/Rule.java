@@ -90,6 +90,14 @@ public record Rule(
     }
 
     /**
+     * Whether a gateway can limit this algorithm from its own memory. Only the token bucket can so far,
+     * which also means only the token bucket may use {@code LOCAL_SYNC} until the leasing phase adds more.
+     */
+    public static boolean servableInMemory(Algorithm algorithm) {
+        return algorithm == Algorithm.TOKEN_BUCKET;
+    }
+
+    /**
      * Which algorithm / mode pairs are allowed. A sliding window log keeps one entry per request,
      * which cannot be split into local leases, so it must be STRICT.
      */
