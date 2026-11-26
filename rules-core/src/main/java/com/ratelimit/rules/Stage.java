@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /** The two points in the request pipeline where a rate limit is applied. */
 public enum Stage {

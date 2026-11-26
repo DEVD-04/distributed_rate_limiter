@@ -2,6 +2,14 @@ package com.ratelimit.gateway.rules;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.ratelimit.rules.FailureMode;
+import com.ratelimit.rules.Mode;
+import com.ratelimit.rules.ResolvedRule;
+import com.ratelimit.rules.Rule;
+import com.ratelimit.rules.RuleContext;
+import com.ratelimit.rules.RuleResolver;
+import com.ratelimit.rules.RuleSet;
+import com.ratelimit.rules.TokenBucketParams;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;

@@ -2,9 +2,9 @@ package com.ratelimit.gateway.ratelimit;
 
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
-import com.ratelimit.gateway.rules.Algorithm;
-import com.ratelimit.gateway.rules.Mode;
-import com.ratelimit.gateway.rules.Rule;
+import com.ratelimit.rules.Algorithm;
+import com.ratelimit.rules.Mode;
+import com.ratelimit.rules.Rule;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;

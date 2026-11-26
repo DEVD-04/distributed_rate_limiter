@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 public enum Algorithm {
     TOKEN_BUCKET,

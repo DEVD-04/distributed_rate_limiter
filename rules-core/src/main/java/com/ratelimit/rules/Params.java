@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /**
  * Algorithm-specific parameters of a rule (the {@code params} JSON column). All three algorithms exist:

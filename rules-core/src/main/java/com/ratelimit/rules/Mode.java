@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /** How a rule's counters are shared between gateway nodes (both modes arrive in later phases). */
 public enum Mode {

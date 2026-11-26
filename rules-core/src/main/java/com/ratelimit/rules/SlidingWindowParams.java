@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /**
  * Sliding window log settings: at most {@code limit} requests in any window of {@code windowMs}.

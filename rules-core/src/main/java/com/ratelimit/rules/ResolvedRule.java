@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /**
  * The rule chosen for a request, plus the limiter key to charge against it.

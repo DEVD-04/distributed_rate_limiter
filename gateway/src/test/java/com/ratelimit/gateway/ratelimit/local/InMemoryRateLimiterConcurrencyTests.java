@@ -4,7 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ratelimit.gateway.ratelimit.FakeNanoClock;
 import com.ratelimit.gateway.ratelimit.TestRules;
-import com.ratelimit.gateway.rules.Rule;
+import com.ratelimit.rules.Rule;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;

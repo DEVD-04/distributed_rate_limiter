@@ -3,7 +3,7 @@ package com.ratelimit.gateway.ratelimit.local;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ratelimit.gateway.ratelimit.FakeNanoClock;
-import com.ratelimit.gateway.rules.TokenBucketParams;
+import com.ratelimit.rules.TokenBucketParams;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 

@@ -23,6 +23,7 @@ records what is built, how to run it, and where the implementation departs from 
 
 | Module | Port | Purpose |
 |---|---|---|
+| `rules-core` | library | Rule model, parameter validation and precedence matching (`com.ratelimit.rules`), shared so the policy service validates exactly what the gateway applies |
 | `gateway` | 8080 | Filters, auth, rate limiting, proxy |
 | `mock-service` | 8081… | Downstream stand-in with configurable latency / error rate |
 | `policy-service` | 8090 | Empty shell; admin API arrives in Phase 3 |

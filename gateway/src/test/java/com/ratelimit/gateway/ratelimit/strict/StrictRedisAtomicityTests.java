@@ -4,7 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ratelimit.gateway.ratelimit.TestRules;
 import com.ratelimit.gateway.ratelimit.api.Decision;
-import com.ratelimit.gateway.rules.Rule;
+import com.ratelimit.rules.Rule;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.util.ArrayList;

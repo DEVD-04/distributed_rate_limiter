@@ -1,7 +1,7 @@
 package com.ratelimit.gateway.ratelimit.web;
 
 import com.ratelimit.gateway.auth.Identity;
-import com.ratelimit.gateway.rules.RuleContext;
+import com.ratelimit.rules.RuleContext;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;

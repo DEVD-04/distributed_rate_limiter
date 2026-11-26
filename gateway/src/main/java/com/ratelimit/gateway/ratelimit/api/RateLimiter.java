@@ -1,6 +1,6 @@
 package com.ratelimit.gateway.ratelimit.api;
 
-import com.ratelimit.gateway.rules.Rule;
+import com.ratelimit.rules.Rule;
 
 public interface RateLimiter {
 

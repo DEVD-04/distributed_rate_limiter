@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /**
  * Chooses which single rule applies to a request at a pipeline stage. The static, configuration

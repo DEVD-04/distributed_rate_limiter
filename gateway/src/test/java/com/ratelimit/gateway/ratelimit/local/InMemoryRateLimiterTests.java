@@ -7,8 +7,8 @@ import com.ratelimit.gateway.ratelimit.FakeNanoClock;
 import com.ratelimit.gateway.ratelimit.TestRules;
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.Reason;
-import com.ratelimit.gateway.rules.Rule;
-import com.ratelimit.gateway.rules.TokenBucketParams;
+import com.ratelimit.rules.Rule;
+import com.ratelimit.rules.TokenBucketParams;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 

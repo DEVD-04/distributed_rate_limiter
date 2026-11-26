@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /**
  * Leaky bucket (queue variant) settings. Requests are released at a constant rate of

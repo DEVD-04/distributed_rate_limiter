@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 import com.google.common.net.InetAddresses;
 import java.util.Locale;

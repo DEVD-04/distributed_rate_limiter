@@ -1,5 +1,8 @@
 package com.ratelimit.gateway.rules;
 
+import com.ratelimit.rules.Rule;
+import com.ratelimit.rules.RuleResolver;
+import com.ratelimit.rules.RuleSet;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.context.annotation.Bean;

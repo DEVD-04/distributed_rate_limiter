@@ -5,4 +5,4 @@ plugins {
 
 rootProject.name = "rate-limit"
 
-include("gateway", "mock-service", "policy-service")
+include("rules-core", "gateway", "mock-service", "policy-service")

@@ -1,13 +1,13 @@
 package com.ratelimit.gateway.ratelimit;
 
-import com.ratelimit.gateway.rules.Algorithm;
-import com.ratelimit.gateway.rules.FailureMode;
-import com.ratelimit.gateway.rules.LeakyBucketParams;
-import com.ratelimit.gateway.rules.LimitBy;
-import com.ratelimit.gateway.rules.Mode;
-import com.ratelimit.gateway.rules.Rule;
-import com.ratelimit.gateway.rules.SlidingWindowParams;
-import com.ratelimit.gateway.rules.TokenBucketParams;
+import com.ratelimit.rules.Algorithm;
+import com.ratelimit.rules.FailureMode;
+import com.ratelimit.rules.LeakyBucketParams;
+import com.ratelimit.rules.LimitBy;
+import com.ratelimit.rules.Mode;
+import com.ratelimit.rules.Rule;
+import com.ratelimit.rules.SlidingWindowParams;
+import com.ratelimit.rules.TokenBucketParams;
 
 /** Builders for rules used across limiter tests. */
 public final class TestRules {

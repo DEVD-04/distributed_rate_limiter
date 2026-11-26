@@ -4,15 +4,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
-import com.ratelimit.gateway.rules.Algorithm;
-import com.ratelimit.gateway.rules.FailureMode;
-import com.ratelimit.gateway.rules.LeakyBucketParams;
-import com.ratelimit.gateway.rules.LimitBy;
-import com.ratelimit.gateway.rules.Mode;
-import com.ratelimit.gateway.rules.Params;
-import com.ratelimit.gateway.rules.Rule;
-import com.ratelimit.gateway.rules.SlidingWindowParams;
-import com.ratelimit.gateway.rules.TokenBucketParams;
+import com.ratelimit.rules.Algorithm;
+import com.ratelimit.rules.FailureMode;
+import com.ratelimit.rules.LeakyBucketParams;
+import com.ratelimit.rules.LimitBy;
+import com.ratelimit.rules.Mode;
+import com.ratelimit.rules.Params;
+import com.ratelimit.rules.Rule;
+import com.ratelimit.rules.SlidingWindowParams;
+import com.ratelimit.rules.TokenBucketParams;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 

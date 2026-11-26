@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /** What to do when the shared store (Redis) is unavailable. Applied from the resilience phase on. */
 public enum FailureMode {

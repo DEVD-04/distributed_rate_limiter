@@ -4,7 +4,7 @@ import static com.ratelimit.gateway.ratelimit.local.Fixed.NANOS_PER_SECOND;
 import static com.ratelimit.gateway.ratelimit.local.Fixed.ceilMulSubDiv;
 import static com.ratelimit.gateway.ratelimit.local.Fixed.mulAddDivMod;
 
-import com.ratelimit.gateway.rules.TokenBucketParams;
+import com.ratelimit.rules.TokenBucketParams;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 

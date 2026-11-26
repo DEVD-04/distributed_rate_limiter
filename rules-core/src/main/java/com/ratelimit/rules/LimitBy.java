@@ -1,4 +1,4 @@
-package com.ratelimit.gateway.rules;
+package com.ratelimit.rules;
 
 /** What a rule counts requests by. IP rules run before authentication, the others after. */
 public enum LimitBy {

@@ -1,5 +1,8 @@
 // Gateway dependencies are added phase by phase (auth, rate limiting, proxy, metrics).
 dependencies {
+    // Rule model, validation and matching (shared with the policy service).
+    implementation(project(":rules-core"))
+
     // Strict IP-literal parsing (never does DNS lookups) for X-Forwarded-For handling.
     implementation("com.google.guava:guava:33.8.0-jre")
 
