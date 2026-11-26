@@ -13,7 +13,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-4 of 8 done (`rules-core`, database, admin API, publishing to Redis) |
+| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-5 of 8 done (`rules-core`, database, admin API, publishing to Redis, gateways load published rules) |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -88,8 +88,8 @@ dev issuer before load testing.
 ### Policy service and its database
 
 The policy service needs PostgreSQL. Flyway creates the schema and seeds it at startup (three tiers, the
-two per-stage default rules and the three sample rules). It publishes to Redis, but gateways do not load
-that copy yet: until Phase 3 is finished they still take their rules from `application.yml`.
+two per-stage default rules and the three sample rules). It publishes to Redis, and a gateway with
+`gateway.redis.url` set loads the published rules when it starts (see below).
 
 ```
 docker run -d --name rl-postgres -p 5432:5432 -e POSTGRES_DB=ratelimit -e POSTGRES_USER=ratelimit \
@@ -131,7 +131,7 @@ reason; unknown fields and parameters are rejected), 404 unknown id, 409 another
 
 #### Publishing to Redis
 
-Gateways will load the configuration from Redis (step 5), never from PostgreSQL.
+Gateways load the configuration from Redis, never from PostgreSQL.
 
 - **Where:** the hash `rl:rules` holds `version` and `snapshot`; each publish sends the version on `rl:rules:updates`.
   The design had two keys; one hash means a version can never be read next to the wrong snapshot. It has no TTL.
@@ -156,11 +156,34 @@ Gateways will load the configuration from Redis (step 5), never from PostgreSQL.
 - `gateway.trusted-proxies`: IPs / CIDRs whose `X-Forwarded-For` is believed. **Empty by default = trust nobody.**
 - `gateway.auth.*`: JWT keys (by `kid`), issuer, audience, leeway; static API keys; `public-paths` that skip auth.
 - `gateway.redis.*`: `url` (empty = no Redis), `command-timeout` (15 ms), `connect-timeout` (1 s).
+- `gateway.ratelimit.snapshot-file` (default `data/rules-snapshot.json`, blank = off): where the last applied
+  published rules are saved. Gateways on one machine need different files.
 - `gateway.ratelimit.rules`: static rules in the shape of the `ratelimit_rules` table (see below). Built-in defaults
   (`default-ip`, `default-user`, negative ids) guarantee nothing is unlimited.
 - `gateway.ratelimit.max-keys` (in-memory buckets held, default 100,000) and `max-waiting` (leaky-bucket requests one
   node may hold waiting at once, default 10,000).
 - `gateway.proxy.*`: routes (path pattern → service → instances), timeouts, ejection threshold and cooldown.
+
+### Where a gateway's rules come from
+
+Without `gateway.redis.url`, from `application.yml` and the built-in defaults. With it, at startup and before
+accepting requests, the gateway uses the first of these that gives usable rules:
+
+1. the snapshot published in Redis (it **replaces** the YAML rules, it is not merged with them);
+2. its own saved copy of the last snapshot it applied;
+3. `application.yml` and the built-in defaults.
+
+- A new set is decoded, validated and built completely, then swapped in with one reference write. A request
+  always sees one whole set. A snapshot that is invalid, or has a rule this gateway cannot enforce, is refused as
+  a whole and the rules in force stay.
+- A swap does not touch limiter state: changing a limit applies to what a user has already used.
+- The YAML rules must still be valid, even when published rules replace them.
+- **A gateway starts even if Redis is down.** It connects in the background; until then limiter calls fail at
+  once (requests are let through). After any outage it reconnects within about a second: the client library's
+  default back-off, which grows to 30 s, is replaced. While disconnected, commands are rejected rather than
+  queued, so they cannot spend tokens later for requests that were already let through.
+- **Not yet:** a running gateway does not pick up later changes until step 6 (restart it meanwhile), and API keys
+  still come from `application.yml` until step 7.
 
 ### Rule parameters per algorithm
 

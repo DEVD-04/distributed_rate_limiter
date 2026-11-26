@@ -16,6 +16,9 @@ gateway:
   # Static rate-limit rules, same shape as the ratelimit_rules table. Anything not matched here falls
   # to the built-in per-stage defaults (default-ip, default-user), so nothing is ever unlimited.
   ratelimit:
+    # With Redis configured, published rules replace the ones below; each applied snapshot is saved here so
+    # the gateway can start with it while Redis is down. Gateways on one machine need different files.
+    snapshot-file: data/rules-snapshot.json
     rules:
       - id: 1
         name: free-images

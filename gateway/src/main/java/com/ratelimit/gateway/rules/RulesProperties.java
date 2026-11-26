@@ -21,13 +21,16 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                            ones go first when it is exceeded
  * @param maxWaiting           how many leaky-bucket requests one node may hold waiting at once; more are
  *                            turned away immediately
+ * @param snapshotFile         where the gateway saves the last published rules it applied, used at startup
+ *                             if Redis is unavailable; blank turns it off. Only used with Redis.
  */
 @ConfigurationProperties(prefix = "gateway.ratelimit")
 public record RulesProperties(
         @DefaultValue List<RuleEntry> rules,
         @DefaultValue("10000") long resolutionCacheSize,
         @DefaultValue("100000") long maxKeys,
-        @DefaultValue("10000") int maxWaiting) {
+        @DefaultValue("10000") int maxWaiting,
+        @DefaultValue("data/rules-snapshot.json") String snapshotFile) {
 
     /** One configured rule. Blank {@code matchTier} / {@code matchSubject} / {@code httpMethod} mean "any". */
     public record RuleEntry(

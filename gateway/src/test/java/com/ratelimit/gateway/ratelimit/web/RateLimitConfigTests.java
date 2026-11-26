@@ -32,7 +32,8 @@ class RateLimitConfigTests {
     static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
-            .withUserConfiguration(Props.class, RedisConfig.class, RulesConfig.class, RateLimitConfig.class);
+            .withUserConfiguration(Props.class, RedisConfig.class, RulesConfig.class, RateLimitConfig.class)
+            .withPropertyValues("gateway.ratelimit.snapshot-file="); // never pick up a saved copy from this machine
 
     private static String redisUrl() {
         return "gateway.redis.url=redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379);

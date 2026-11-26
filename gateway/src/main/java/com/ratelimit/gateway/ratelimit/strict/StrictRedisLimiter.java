@@ -14,6 +14,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -111,7 +112,7 @@ public class StrictRedisLimiter implements RateLimiter {
     /** Default bound on requests waiting in this node at once (each one is a parked virtual thread). */
     public static final int DEFAULT_MAX_WAITING = 10_000;
 
-    private final StatefulRedisConnection<String, String> connection;
+    private final Supplier<StatefulRedisConnection<String, String>> connection;
     private final Semaphore waiting;
     private final AtomicLong lastFailureLogNanos = new AtomicLong(System.nanoTime() - LOG_INTERVAL_NANOS);
 
@@ -121,6 +122,14 @@ public class StrictRedisLimiter implements RateLimiter {
 
     /** @param maxWaiting how many leaky-bucket requests this node may hold at once; more are turned away */
     public StrictRedisLimiter(StatefulRedisConnection<String, String> connection, int maxWaiting) {
+        this(() -> connection, maxWaiting);
+    }
+
+    /**
+     * @param connection asked for on every call; it may throw while Redis has not been reached, which is
+     *                   handled like any other Redis failure
+     */
+    public StrictRedisLimiter(Supplier<StatefulRedisConnection<String, String>> connection, int maxWaiting) {
         this.connection = connection;
         this.waiting = new Semaphore(maxWaiting);
     }
@@ -230,7 +239,7 @@ public class StrictRedisLimiter implements RateLimiter {
     /** @return the script result, or {@code null} if Redis could not be reached (already logged) */
     private List<Long> run(Rule rule, LuaScript script, List<String> keys, String... args) {
         try {
-            return script.run(connection, keys, args);
+            return script.run(connection.get(), keys, args);
         } catch (RuntimeException e) {
             logFailure(rule, e);
             return null;

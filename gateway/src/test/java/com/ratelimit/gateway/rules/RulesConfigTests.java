@@ -8,7 +8,6 @@ import com.ratelimit.rules.ResolvedRule;
 import com.ratelimit.rules.Rule;
 import com.ratelimit.rules.RuleContext;
 import com.ratelimit.rules.RuleResolver;
-import com.ratelimit.rules.RuleSet;
 import com.ratelimit.rules.TokenBucketParams;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -63,7 +62,7 @@ class RulesConfigTests {
                 "gateway.ratelimit.rules[0].match-tier=",
                 "gateway.ratelimit.rules[0].match-subject=",
                 "gateway.ratelimit.rules[0].http-method=").run(ctx -> {
-            Rule rule = ((RuleSet) ctx.getBean(RuleResolver.class)).rules().stream()
+            Rule rule = ctx.getBean(LiveRuleResolver.class).current().rules().stream()
                     .filter(r -> r.ruleId() == 5).findFirst().orElseThrow();
             assertThat(rule.matchTier()).isNull();
             assertThat(rule.matchSubject()).isNull();
