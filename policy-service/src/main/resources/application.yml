@@ -4,6 +4,12 @@ spring:
   threads:
     virtual:
       enabled: true
+  # PostgreSQL is the source of truth for rules, tiers and API keys. Flyway creates and upgrades the
+  # schema at startup. No password has a default; set POLICY_DB_PASSWORD.
+  datasource:
+    url: ${POLICY_DB_URL:jdbc:postgresql://localhost:5432/ratelimit}
+    username: ${POLICY_DB_USER:ratelimit}
+    password: ${POLICY_DB_PASSWORD:}
 
 server:
   port: 8090

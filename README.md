@@ -13,7 +13,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | Not started |
+| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1 (`rules-core`) and 2 (database) of 8 |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -26,7 +26,7 @@ records what is built, how to run it, and where the implementation departs from 
 | `rules-core` | library | Rule model, parameter validation and precedence matching (`com.ratelimit.rules`), shared so the policy service validates exactly what the gateway applies |
 | `gateway` | 8080 | Filters, auth, rate limiting, proxy |
 | `mock-service` | 8081… | Downstream stand-in with configurable latency / error rate |
-| `policy-service` | 8090 | Empty shell; admin API arrives in Phase 3 |
+| `policy-service` | 8090 | Owns the PostgreSQL schema and seed data (Flyway); the admin API and publishing come next in Phase 3 |
 
 Gateway request pipeline (servlet filters, in order):
 `RequestIdFilter` → `RequestGuardFilter` → `ClientIpFilter` → `PreAuthRateLimitFilter` (by IP) →
@@ -44,7 +44,7 @@ Rate limiting inside the gateway: `RateLimiterRouter` picks a limiter per rule.
 ## Build and test
 
 Gradle 9.9 (wrapper included), Java 21 via a Gradle toolchain (downloaded on first build; the machine's own JDK is only used to run Gradle).
-**Docker must be running**: the Redis tests start `redis:7-alpine` containers through Testcontainers.
+**Docker must be running**: tests start `redis:7-alpine` and `postgres:17-alpine` containers through Testcontainers.
 
 ```
 ./gradlew build            # compile + all tests (needs Docker)
@@ -84,6 +84,22 @@ Mock-service knobs (environment variables): `MOCK_LATENCY_MS`, `MOCK_LATENCY_JIT
 JWT auth needs a public key in `gateway.auth.jwt.public-keys.<kid>` plus `issuer` and `audience`. There is
 no runnable token issuer yet: tokens are minted only by the test helper `TokenFactory`. Add a small
 dev issuer before load testing.
+
+### Policy service and its database
+
+The policy service needs PostgreSQL. Flyway creates the schema and seeds it at startup (three tiers, the
+two per-stage default rules and the three sample rules). Nothing reads from it yet: until Phase 3 is
+finished the gateway still takes its rules from `application.yml`.
+
+```
+docker run -d --name rl-postgres -p 5432:5432 -e POSTGRES_DB=ratelimit -e POSTGRES_USER=ratelimit \
+  -e POSTGRES_PASSWORD=local-dev-only postgres:17-alpine
+./gradlew :policy-service:bootJar
+POLICY_DB_PASSWORD=local-dev-only java -jar policy-service/build/libs/policy-service-0.1.0-SNAPSHOT.jar
+```
+
+Settings: `POLICY_DB_URL` (default `jdbc:postgresql://localhost:5432/ratelimit`), `POLICY_DB_USER` (default
+`ratelimit`), `POLICY_DB_PASSWORD` (no default).
 
 ## Configuration (`gateway/src/main/resources/application.yml`)
 
