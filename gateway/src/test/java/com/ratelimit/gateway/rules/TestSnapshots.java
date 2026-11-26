@@ -1,6 +1,7 @@
 package com.ratelimit.gateway.rules;
 
 import com.ratelimit.rules.Algorithm;
+import com.ratelimit.rules.ApiKeyHash;
 import com.ratelimit.rules.FailureMode;
 import com.ratelimit.rules.LeakyBucketParams;
 import com.ratelimit.rules.LimitBy;
@@ -32,7 +33,14 @@ final class TestSnapshots {
     }
 
     static String snapshot(long version, Rule... rules) {
-        List<Rule> list = Arrays.asList(rules);
-        return SnapshotCodec.encode(new ConfigSnapshot(version, list, List.of()));
+        return snapshot(version, List.of(), rules);
+    }
+
+    static String snapshot(long version, List<ConfigSnapshot.ApiKeyEntry> apiKeys, Rule... rules) {
+        return SnapshotCodec.encode(new ConfigSnapshot(version, Arrays.asList(rules), apiKeys));
+    }
+
+    static ConfigSnapshot.ApiKeyEntry key(String apiKey, String userId, String tier) {
+        return new ConfigSnapshot.ApiKeyEntry(ApiKeyHash.of(apiKey), userId, tier);
     }
 }

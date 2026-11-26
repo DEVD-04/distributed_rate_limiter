@@ -1,5 +1,6 @@
 package com.ratelimit.gateway.auth;
 
+import com.ratelimit.gateway.rules.LiveRuleResolver;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
 import java.util.LinkedHashMap;
@@ -34,7 +35,8 @@ public class AuthConfig {
     }
 
     @Bean
-    ApiKeyStore apiKeyStore(AuthProperties properties) {
-        return new StaticApiKeyStore(properties.apiKeys());
+    ApiKeyStore apiKeyStore(AuthProperties properties, LiveRuleResolver published) {
+        // the configured keys are validated even when published ones are going to replace them
+        return new LiveApiKeyStore(new StaticApiKeyStore(properties.apiKeys()), published);
     }
 }

@@ -8,11 +8,16 @@ import com.ratelimit.rules.RuleSet;
 import com.ratelimit.rules.snapshot.ConfigSnapshot;
 import com.ratelimit.rules.snapshot.SnapshotCodec;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The rules in force, which can be replaced while requests are being served.
+ * The configuration in force (rules, and the API keys published with them), which can be replaced while
+ * requests are being served. The two come in one snapshot and are replaced together.
  *
  * <p>A new set is decoded, validated and built completely before anything changes, and then replaces the
  * old one in a single reference write. A request therefore always sees one whole set, and a snapshot with
@@ -43,7 +48,8 @@ public class LiveRuleResolver implements RuleResolver {
 
     private static final Logger log = LoggerFactory.getLogger(LiveRuleResolver.class);
 
-    private record Active(RuleSet rules, Source source, String snapshot) {
+    /** @param apiKeys the published keys by hash; {@code null} while the configuration comes from the YAML */
+    private record Active(RuleSet rules, Map<String, ConfigSnapshot.ApiKeyEntry> apiKeys, Source source, String snapshot) {
     }
 
     private final RuleSet configured;
@@ -55,7 +61,7 @@ public class LiveRuleResolver implements RuleResolver {
     public LiveRuleResolver(RuleSet configured, long resolutionCacheSize) {
         this.configured = configured;
         this.resolutionCacheSize = resolutionCacheSize;
-        this.active = new Active(configured, Source.CONFIGURATION, null);
+        this.active = new Active(configured, null, Source.CONFIGURATION, null);
     }
 
     @Override
@@ -78,6 +84,14 @@ public class LiveRuleResolver implements RuleResolver {
     }
 
     /**
+     * The API keys of the snapshot in force, by hash. Empty (no value at all) while no published
+     * snapshot is in force; a present but empty map means published configuration with no keys.
+     */
+    public Optional<Map<String, ConfigSnapshot.ApiKeyEntry>> publishedApiKeys() {
+        return Optional.ofNullable(active.apiKeys());
+    }
+
+    /**
      * Puts a published snapshot into force. Any version is accepted, including a lower one than the
      * current: the publisher's copy follows its database, which may have been restored.
      *
@@ -91,13 +105,14 @@ public class LiveRuleResolver implements RuleResolver {
     public synchronized Outcome apply(String text, Source source) {
         Active current = active;
         if (text.equals(current.snapshot())) {
-            active = new Active(current.rules(), source, text);
+            active = new Active(current.rules(), current.apiKeys(), source, text);
             return Outcome.UNCHANGED;
         }
         if (text.equals(lastRejected)) {
             return Outcome.REJECTED;
         }
         RuleSet next;
+        Map<String, ConfigSnapshot.ApiKeyEntry> nextKeys;
         try {
             ConfigSnapshot snapshot = SnapshotCodec.decode(text);
             List<String> problems = RateLimiterRouter.unservable(snapshot.rules(), true);
@@ -108,14 +123,17 @@ public class LiveRuleResolver implements RuleResolver {
                 return Outcome.REJECTED;
             }
             next = RuleSet.of(snapshot.version(), snapshot.rules(), resolutionCacheSize);
+            nextKeys = snapshot.apiKeys().stream()
+                    .collect(Collectors.toUnmodifiableMap(ConfigSnapshot.ApiKeyEntry::keyHash, Function.identity()));
         } catch (IllegalArgumentException e) {
             log.error("Rejected an invalid rules snapshot from {}; keeping the current rules: {}", source, e.getMessage());
             lastRejected = text;
             return Outcome.REJECTED;
         }
-        active = new Active(next, source, text);
+        active = new Active(next, nextKeys, source, text);
         lastRejected = null;
-        log.info("Rules version {} from {} are in force ({} rules)", next.version(), source, next.rules().size());
+        log.info("Rules version {} from {} are in force ({} rules, {} API keys)",
+                next.version(), source, next.rules().size(), nextKeys.size());
         return Outcome.APPLIED;
     }
 }

@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Every response also carries headers the gateway must not let through ({@code X-RateLimit-Limit},
  * {@code X-Request-Id}) and one it should ({@code X-Custom}).
  */
-final class StubUpstream implements AutoCloseable {
+public final class StubUpstream implements AutoCloseable {
 
     static final int BIG_RESPONSE_BYTES = 1024 * 1024;
 
@@ -40,7 +40,7 @@ final class StubUpstream implements AutoCloseable {
     private final AtomicInteger requests = new AtomicInteger();
     private volatile Map<String, List<String>> lastHeaders = Map.of();
 
-    StubUpstream(String name) throws IOException {
+    public StubUpstream(String name) throws IOException {
         this.name = name;
         this.server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         this.server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
@@ -55,7 +55,7 @@ final class StubUpstream implements AutoCloseable {
         }
     }
 
-    String url() {
+    public String url() {
         return "http://127.0.0.1:" + server.getAddress().getPort();
     }
 
@@ -64,7 +64,7 @@ final class StubUpstream implements AutoCloseable {
     }
 
     /** Headers of the most recent request, names lower-cased. */
-    Map<String, List<String>> lastHeaders() {
+    public Map<String, List<String>> lastHeaders() {
         return lastHeaders;
     }
 

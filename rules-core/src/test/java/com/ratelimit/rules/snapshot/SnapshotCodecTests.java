@@ -111,6 +111,13 @@ class SnapshotCodecTests {
     }
 
     @Test
+    void theSameKeyHashListedTwiceRejectsTheSnapshot() {
+        assertThatThrownBy(() -> new ConfigSnapshot(1, List.of(), List.of(KEY_A, new ApiKeyEntry(KEY_A.keyHash(), "eve", "pro"))))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("more than once");
+        assertRejected(SnapshotCodec.encode(sample()).replace(KEY_B.keyHash(), KEY_A.keyHash()), "more than once");
+    }
+
+    @Test
     void aMalformedApiKeyEntryRejectsTheSnapshot() {
         assertRejected(SnapshotCodec.encode(sample()).replace(KEY_A.keyHash(), "raw-key"), "SHA-256");
     }

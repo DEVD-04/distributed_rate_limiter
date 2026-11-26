@@ -13,7 +13,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-6 of 8 done (`rules-core`, database, admin API, publishing to Redis, gateways load published rules and follow changes) |
+| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-7 of 8 done (`rules-core`, database, admin API, publishing to Redis, gateways load rules and API keys and follow changes) |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -154,7 +154,8 @@ Gateways load the configuration from Redis, never from PostgreSQL.
 ## Configuration (`gateway/src/main/resources/application.yml`)
 
 - `gateway.trusted-proxies`: IPs / CIDRs whose `X-Forwarded-For` is believed. **Empty by default = trust nobody.**
-- `gateway.auth.*`: JWT keys (by `kid`), issuer, audience, leeway; static API keys; `public-paths` that skip auth.
+- `gateway.auth.*`: JWT keys (by `kid`), issuer, audience, leeway; static API keys (used only while no published
+  configuration is in force, see below); `public-paths` that skip auth.
 - `gateway.redis.*`: `url` (empty = no Redis), `command-timeout` (15 ms), `connect-timeout` (1 s).
 - `gateway.ratelimit.subscribe-to-updates` (default true) and `update-poll-interval` (default 10 s): how a running
   gateway learns of changes (with Redis).
@@ -184,7 +185,22 @@ accepting requests, the gateway uses the first of these that gives usable rules:
   once (requests are let through). After any outage it reconnects within about a second: the client library's
   default back-off, which grows to 30 s, is replaced. While disconnected, commands are rejected rather than
   queued, so they cannot spend tokens later for requests that were already let through.
-- **Not yet:** API keys still come from `application.yml` until step 7.
+
+#### API keys
+
+API keys travel in the same snapshot as the rules and are swapped with them in one step, so creating,
+revoking or re-tiering a key takes effect without a restart.
+
+- **Published keys replace the ones in `gateway.auth.api-keys`; the two are never merged.** Otherwise a key
+  revoked through the admin API would keep working for as long as a gateway's YAML listed it. The YAML keys
+  apply only while no published configuration is in force: without Redis, or when Redis has nothing usable and
+  there is no saved copy. Once keys come from the policy service, create them there.
+- **Measured** with the real services: a new key was accepted 0.7 s after the admin API created it, and a revoked
+  key was refused within 0.05 s of the admin API's response.
+- **What this trades for availability.** A gateway that cannot reach Redis keeps the keys it has, so a key revoked
+  during the outage keeps working until Redis is back; a gateway that *restarts* during an outage accepts the
+  keys in its saved copy, or, with no copy, the YAML ones. A snapshot is applied whole or not at all, so one a
+  gateway refuses (for example from a newer policy service) also holds back the revocations in it.
 
 #### Following changes while running
 

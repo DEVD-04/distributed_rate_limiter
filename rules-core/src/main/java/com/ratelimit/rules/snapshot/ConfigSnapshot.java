@@ -37,5 +37,8 @@ public record ConfigSnapshot(long version, List<Rule> rules, List<ApiKeyEntry> a
         }
         rules = List.copyOf(rules);
         apiKeys = List.copyOf(apiKeys);
+        if (apiKeys.stream().map(ApiKeyEntry::keyHash).distinct().count() != apiKeys.size()) {
+            throw new IllegalArgumentException("snapshot lists the same API key hash more than once");
+        }
     }
 }
