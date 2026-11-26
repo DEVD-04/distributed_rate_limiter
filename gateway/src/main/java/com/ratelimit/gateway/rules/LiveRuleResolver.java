@@ -49,6 +49,7 @@ public class LiveRuleResolver implements RuleResolver {
     private final RuleSet configured;
     private final long resolutionCacheSize;
     private volatile Active active;
+    private String lastRejected; // guarded by this
 
     /** @param configured the rules from configuration, in force until a snapshot replaces them */
     public LiveRuleResolver(RuleSet configured, long resolutionCacheSize) {
@@ -82,6 +83,9 @@ public class LiveRuleResolver implements RuleResolver {
      *
      * <p>Only meaningful when Redis is configured, since published rules may need it.
      *
+     * <p>The same refused text offered again is refused quietly: it is re-read every few seconds, and
+     * one broken snapshot should produce one error, not a stream of them.
+     *
      * @param text the snapshot as published
      */
     public synchronized Outcome apply(String text, Source source) {
@@ -90,6 +94,9 @@ public class LiveRuleResolver implements RuleResolver {
             active = new Active(current.rules(), source, text);
             return Outcome.UNCHANGED;
         }
+        if (text.equals(lastRejected)) {
+            return Outcome.REJECTED;
+        }
         RuleSet next;
         try {
             ConfigSnapshot snapshot = SnapshotCodec.decode(text);
@@ -97,14 +104,17 @@ public class LiveRuleResolver implements RuleResolver {
             if (!problems.isEmpty()) {
                 log.error("Rejected rules version {} from {}; keeping the current rules. This gateway cannot enforce: {}",
                         snapshot.version(), source, String.join("; ", problems));
+                lastRejected = text;
                 return Outcome.REJECTED;
             }
             next = RuleSet.of(snapshot.version(), snapshot.rules(), resolutionCacheSize);
         } catch (IllegalArgumentException e) {
             log.error("Rejected an invalid rules snapshot from {}; keeping the current rules: {}", source, e.getMessage());
+            lastRejected = text;
             return Outcome.REJECTED;
         }
         active = new Active(next, source, text);
+        lastRejected = null;
         log.info("Rules version {} from {} are in force ({} rules)", next.version(), source, next.rules().size());
         return Outcome.APPLIED;
     }

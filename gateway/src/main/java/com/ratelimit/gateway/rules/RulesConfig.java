@@ -3,6 +3,7 @@ package com.ratelimit.gateway.rules;
 import com.ratelimit.gateway.redis.RedisConnector;
 import com.ratelimit.rules.Rule;
 import com.ratelimit.rules.RuleSet;
+import io.lettuce.core.RedisClient;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -46,5 +47,13 @@ public class RulesConfig {
             RulesProperties properties) {
         return new RuleSnapshotLoader(Optional.ofNullable(redis.getIfAvailable()), resolver,
                 new RuleSnapshotFile(properties.snapshotFile()));
+    }
+
+    /** Applies later changes while the gateway runs. Does nothing without Redis. */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    RuleUpdateListener ruleUpdateListener(ObjectProvider<RedisClient> client, RuleSnapshotLoader loader,
+            RulesProperties properties) {
+        return new RuleUpdateListener(Optional.ofNullable(client.getIfAvailable()), loader,
+                properties.updatePollInterval(), properties.subscribeToUpdates());
     }
 }

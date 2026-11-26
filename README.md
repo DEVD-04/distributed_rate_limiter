@@ -13,7 +13,7 @@ records what is built, how to run it, and where the implementation departs from 
 |---|---|---|
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
-| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-5 of 8 done (`rules-core`, database, admin API, publishing to Redis, gateways load published rules) |
+| 3 Rules | Flyway schema, policy service, Redis snapshot, pub/sub, hot reload | In progress: steps 1-6 of 8 done (`rules-core`, database, admin API, publishing to Redis, gateways load published rules and follow changes) |
 | 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
@@ -89,7 +89,7 @@ dev issuer before load testing.
 
 The policy service needs PostgreSQL. Flyway creates the schema and seeds it at startup (three tiers, the
 two per-stage default rules and the three sample rules). It publishes to Redis, and a gateway with
-`gateway.redis.url` set loads the published rules when it starts (see below).
+`gateway.redis.url` set loads the published rules when it starts and follows later changes (see below).
 
 ```
 docker run -d --name rl-postgres -p 5432:5432 -e POSTGRES_DB=ratelimit -e POSTGRES_USER=ratelimit \
@@ -156,6 +156,8 @@ Gateways load the configuration from Redis, never from PostgreSQL.
 - `gateway.trusted-proxies`: IPs / CIDRs whose `X-Forwarded-For` is believed. **Empty by default = trust nobody.**
 - `gateway.auth.*`: JWT keys (by `kid`), issuer, audience, leeway; static API keys; `public-paths` that skip auth.
 - `gateway.redis.*`: `url` (empty = no Redis), `command-timeout` (15 ms), `connect-timeout` (1 s).
+- `gateway.ratelimit.subscribe-to-updates` (default true) and `update-poll-interval` (default 10 s): how a running
+  gateway learns of changes (with Redis).
 - `gateway.ratelimit.snapshot-file` (default `data/rules-snapshot.json`, blank = off): where the last applied
   published rules are saved. Gateways on one machine need different files.
 - `gateway.ratelimit.rules`: static rules in the shape of the `ratelimit_rules` table (see below). Built-in defaults
@@ -182,8 +184,20 @@ accepting requests, the gateway uses the first of these that gives usable rules:
   once (requests are let through). After any outage it reconnects within about a second: the client library's
   default back-off, which grows to 30 s, is replaced. While disconnected, commands are rejected rather than
   queued, so they cannot spend tokens later for requests that were already let through.
-- **Not yet:** a running gateway does not pick up later changes until step 6 (restart it meanwhile), and API keys
-  still come from `application.yml` until step 7.
+- **Not yet:** API keys still come from `application.yml` until step 7.
+
+#### Following changes while running
+
+- **Announcements:** the gateway subscribes to `rl:rules:updates` and reloads on each message. Subscribing, including
+  again after a lost connection, also reloads, to catch what it could not hear.
+- **Polling:** pub/sub delivers nothing to a subscriber that is away, so the published snapshot is also re-read every
+  10 s. The whole snapshot is compared, not only the version (a change from the design): the policy service can
+  repair a damaged copy without changing the version. The cost is one small read per gateway per interval.
+- All reloads run on one thread, never on the Redis client's network thread. A burst of messages collapses into
+  few reloads. A refused snapshot is logged once, not at every poll. An emptied Redis leaves the rules in force.
+- **Tested:** an announced change reaches 3 gateways within 2 s; with announcements off it applies within 15 s at
+  the default interval; announcements are heard again after a Redis restart; a gateway that started without Redis
+  catches up as soon as Redis appears.
 
 ### Rule parameters per algorithm
 

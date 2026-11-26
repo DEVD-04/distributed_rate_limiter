@@ -6,6 +6,7 @@ import com.ratelimit.rules.LimitBy;
 import com.ratelimit.rules.Mode;
 import com.ratelimit.rules.ParamsFactory;
 import com.ratelimit.rules.Rule;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -23,6 +24,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                            turned away immediately
  * @param snapshotFile         where the gateway saves the last published rules it applied, used at startup
  *                             if Redis is unavailable; blank turns it off. Only used with Redis.
+ * @param updatePollInterval   how often the published rules are re-read, in case a change message was
+ *                             lost. Only used with Redis.
+ * @param subscribeToUpdates   whether to also react to change messages at once. Only used with Redis.
  */
 @ConfigurationProperties(prefix = "gateway.ratelimit")
 public record RulesProperties(
@@ -30,7 +34,9 @@ public record RulesProperties(
         @DefaultValue("10000") long resolutionCacheSize,
         @DefaultValue("100000") long maxKeys,
         @DefaultValue("10000") int maxWaiting,
-        @DefaultValue("data/rules-snapshot.json") String snapshotFile) {
+        @DefaultValue("data/rules-snapshot.json") String snapshotFile,
+        @DefaultValue("10s") Duration updatePollInterval,
+        @DefaultValue("true") boolean subscribeToUpdates) {
 
     /** One configured rule. Blank {@code matchTier} / {@code matchSubject} / {@code httpMethod} mean "any". */
     public record RuleEntry(

@@ -19,6 +19,10 @@ gateway:
     # With Redis configured, published rules replace the ones below; each applied snapshot is saved here so
     # the gateway can start with it while Redis is down. Gateways on one machine need different files.
     snapshot-file: data/rules-snapshot.json
+    # A running gateway reloads when the policy service announces a change, and also re-reads the published
+    # rules this often in case an announcement was lost.
+    subscribe-to-updates: true
+    update-poll-interval: 10s
     rules:
       - id: 1
         name: free-images

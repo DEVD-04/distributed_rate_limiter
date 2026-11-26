@@ -94,6 +94,9 @@ class GatewayRuleLoadingTests {
                 "--server.port=0",
                 "--gateway.redis.url=" + url,
                 "--gateway.redis.command-timeout=200ms", // generous, so a busy test machine does not fail open
+                // These tests decide when rules are re-read; live updates have their own tests.
+                "--gateway.ratelimit.subscribe-to-updates=false",
+                "--gateway.ratelimit.update-poll-interval=1h",
                 "--gateway.ratelimit.snapshot-file=" + savedCopy());
         gateways.add(gateway);
         return gateway;
