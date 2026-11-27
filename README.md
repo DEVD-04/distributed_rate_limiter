@@ -15,7 +15,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
-| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-4 of 7 done (borrowing script, node count, local tokens, refills and expiry; no rule uses them yet) |
+| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-5 of 7 done (`LOCAL_SYNC` token bucket rules now share one limit across gateways) |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
@@ -36,11 +36,11 @@ Gateway request pipeline (servlet filters, in order):
 
 Rate limiting inside the gateway: `RateLimiterRouter` picks a limiter per rule.
 
-| | In memory (`InMemoryRateLimiter`) | Redis (`StrictRedisLimiter`) |
-|---|---|---|
-| Used for | rules with `mode: LOCAL_SYNC`, and everything when no Redis is configured | rules with `mode: STRICT` (the default) when `gateway.redis.url` is set |
-| Algorithms | token bucket | token bucket, sliding window log, leaky bucket (queue) |
-| Across nodes | each node counts alone: N nodes admit up to N × the limit | exact: one atomic Lua script per decision, time from Redis `TIME` |
+| | `STRICT` (`StrictRedisLimiter`) | `LOCAL_SYNC` (`LocalSyncLimiter`) | In memory (`InMemoryRateLimiter`) |
+|---|---|---|---|
+| Used for | `mode: STRICT` rules (the default) with `gateway.redis.url` set | `mode: LOCAL_SYNC` rules with it set | everything without it; `LOCAL_SYNC` when no tokens can be borrowed |
+| Algorithms | token bucket, sliding window log, leaky bucket (queue) | token bucket | token bucket |
+| Across nodes | exact: one atomic Lua script per decision, time from Redis `TIME` | one shared bucket, lent to nodes in batches; most requests need no Redis call | each node counts alone: N nodes admit up to N × the limit |
 
 ## Build and test
 
@@ -138,7 +138,7 @@ curl -H "X-Admin-Token: $POLICY_ADMIN_TOKEN" -H 'Content-Type: application/json'
 A change is applied in one transaction: it locks the configuration, writes the row, builds the complete active
 rule set with the same code a gateway uses, and only then raises the version. Errors: 400 invalid (with the
 reason; unknown fields and parameters are rejected), 404 unknown id, 409 another active rule has the same scope.
-`LOCAL_SYNC` is accepted only for the token bucket until the leasing phase.
+`LOCAL_SYNC` is accepted only for the token bucket (the leaky bucket is the next step).
 
 #### Publishing to Redis
 
@@ -179,7 +179,10 @@ Gateways load the configuration from Redis, never from PostgreSQL.
   published rules are saved. Gateways on one machine need different files.
 - `gateway.ratelimit.rules`: static rules in the shape of the `ratelimit_rules` table (see below). Built-in defaults
   (`default-ip`, `default-user`, negative ids) guarantee nothing is unlimited.
-- `gateway.ratelimit.max-keys` (in-memory buckets held, default 100,000) and `max-waiting` (leaky-bucket requests one
+- `gateway.lease.*` (with Redis), for `LOCAL_SYNC`: `min-batch` (1), `horizon` (1 s: a batch is the tokens expected
+  over it, and may be spent for twice as long), `refill-below` (0.3: fetch the next batch in the background below this
+  fraction of the last; 0 = off). A longer horizon means fewer Redis calls and more tokens held by one node.
+- `gateway.ratelimit.max-keys` (in-memory buckets and borrowed-token states held, default 100,000) and `max-waiting` (leaky-bucket requests one
   node may hold waiting at once, default 10,000).
 - `gateway.proxy.*`: routes (path pattern → service → instances), timeouts, ejection threshold and cooldown.
 
@@ -230,6 +233,12 @@ revoking or re-tiering a key takes effect without a restart.
 - **Tested:** an announced change reaches 3 gateways within 2 s; with announcements off it applies within 15 s at
   the default interval; announcements are heard again after a Redis restart; a gateway that started without Redis
   catches up as soon as Redis appears.
+- **Limiter state is kept** across a change, so a new limit applies to what was already used, also when a rule moves
+  between `STRICT` and `LOCAL_SYNC`. When a `LOCAL_SYNC` rule's parameters change, each node **throws away** the tokens
+  it borrowed under the old ones, including those of calls still in progress, and asks again at once. They are not
+  given back: the shared bucket is clamped to a lowered capacity once, but nodes return at different moments, and
+  every return would fill it up to the new capacity again. In a test where three gateways each held about 49 tokens
+  and the limit was lowered to 5, giving them back admitted 9; throwing them away admits 5.
 
 ### Rule parameters per algorithm
 
@@ -307,7 +316,7 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
   bucket admits exactly its capacity, the sliding window exactly its limit, 20 keys each exactly their own limit, and
   leaky-bucket requests from all three nodes are released on one shared schedule.
 - **Live, 3 gateway processes sharing one Redis, 450 requests per path:** a `STRICT` rule of capacity 100 admitted exactly
-  **100** across the cluster. The same rule as `LOCAL_SYNC` admitted **300** (100 per node), which is why Phase 4's
+  **100** across the cluster. The same rule as `LOCAL_SYNC`, then still counted per node, admitted **300** (100 per node), which is why Phase 4's
   leasing exists.
 - **Whole-gateway overhead, sequential requests (ms):** direct to the mock p50 0.31 / p99 1.19; gateway with in-memory
   limits p50 1.05 / p99 2.92; gateway with STRICT limits p50 2.94 / p99 4.95. So STRICT adds about 3.8 ms at p99 at low load
@@ -337,17 +346,23 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
   Measured on the laptop at 300 requests/s over three just-started gateways: in one run 172 of 1,200 requests in
   the first 4 s were unchecked (p99 959 ms); in another, with the load applied steadily, 18 of about 1,500 in the
   first 5 s; after that, none. So `STRICT` is exact only once warm. Phase 5's `LOCAL_FALLBACK` would keep limiting
-  such requests locally; warming a node before it takes traffic, or a longer timeout, would reduce them.
+  such requests locally; warming a node before it takes traffic, or a longer timeout, would reduce them. A
+  `LOCAL_SYNC` request whose call fails is not let through unchecked: the node limits it by itself.
 - While gateways are switching to a new rule (a few milliseconds apart in the measured runs), one may still apply
   the old parameters to the same Redis bucket another is already treating with the new ones.
 - The admin API has no TLS and one shared token, so changes cannot be attributed to a person. Keep it off
   untrusted networks.
 - During a Redis outage a revoked API key keeps working, and a rule made invalid by editing the database directly
   blocks all publishing, revocations included (details under "API keys" and "Publishing to Redis").
-- **If Redis is unreachable the request is let through** and an error is logged (at most every 10 s), with decision reason
+- **If Redis is unreachable, a `STRICT` request is let through** (all three algorithms) and an error is logged (at most every 10 s), with decision reason
   `LIMITER_UNAVAILABLE`. This is a stop-gap: per-rule `failure_mode` (FAIL_OPEN / FAIL_CLOSED / LOCAL_FALLBACK) and the
   circuit breaker arrive in Phase 5. `failure_mode` is validated and stored but nothing acts on it yet.
-- `LOCAL_SYNC` is plain per-node memory until Phase 4: a cluster of N nodes admits up to N × the limit for those rules.
+- **`LOCAL_SYNC` is not exact.** A burst can reach the capacity plus the tokens nodes hold (see below), and it can
+  refuse while another node holds unspent tokens. Tokens a node borrowed for a key it never hears from again are lost
+  until the shared bucket refills; so are those held by a node that shuts down. With a small limit a node's share is a
+  few tokens, so it saves few Redis calls; it is meant for high-volume limits.
+- **While Redis is unreachable, `LOCAL_SYNC` rules are limited by each node alone:** after what it had borrowed, each
+  starts from a full in-memory bucket, so N nodes can admit about N × the limit on top of what was lent.
 - Sliding-window and leaky-bucket rules need Redis (checked at startup). Their `cost` must be 1.
 - A request held by a leaky bucket is lost if its node crashes. The proxy read timeout (10 s by default) and any load
   balancer timeout must exceed the longest wait of any leaky rule (up to 60 s).
@@ -359,12 +374,11 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
 - Real Tomcat answers TRACE with an empty 405 before the guard filter sees it; the guard's JSON 405 is covered by MockMvc tests only.
 - No `docker-compose.yml` yet; it arrives with the later phases (Postgres, policy service, Prometheus, Grafana).
 
-## Next: Phase 4 (LOCAL_SYNC)
+## Next: the rest of Phase 4 (LOCAL_SYNC)
 
-Token leasing for `LOCAL_SYNC` token bucket rules: local buckets refilled by an atomic lease script in Redis, sized
-to each node's demand, node membership by heartbeat, `LOCAL_SYNC` for the leaky bucket (approximate: each node
-releases at 1/N of the rate), and tests including all of one key's traffic on one node. It replaces today's per-node
-counting, under which N nodes admit up to N × the limit.
+Token leasing for `LOCAL_SYNC` token bucket rules is in use. Left: `LOCAL_SYNC` for the leaky bucket (approximate: each
+node releases at 1/N of the rate), and a proof with three gateway processes under load, including all of one key's
+traffic on one node, measuring unused allowance, Redis calls and latency against `STRICT`.
 
 Steps: (1) borrowing script, (2) node count, (3) local tokens, (4) refills and expiry, (5) wiring into the gateway,
 (6) leaky bucket, (7) proof.

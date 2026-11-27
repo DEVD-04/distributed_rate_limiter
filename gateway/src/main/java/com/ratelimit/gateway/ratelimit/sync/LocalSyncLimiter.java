@@ -48,6 +48,14 @@ import org.slf4j.LoggerFactory;
  * <p>If a lease call fails, the requests that were waiting for it go to the fallback limiter. Tokens
  * already borrowed are still spent until they expire.
  *
+ * <p><b>When a rule's parameters change</b>, what was borrowed under the old ones is thrown away: not spent
+ * and <em>not given back</em>, and so is a grant that arrives for a call made under them. Giving them back
+ * would be wrong. The shared bucket is clamped to the new capacity once, but each node returns at its own
+ * next request, and every such return would fill the bucket up to the new capacity again after some of it
+ * had been spent. Throwing tokens away only admits less. "No tokens" is forgotten too, so a raised limit
+ * applies at once. While gateways switch rules, requests still holding the old rule can make a key change
+ * back and forth for a moment.
+ *
  * <p>Each (rule, key) has its own lock, held only for a few field updates and never during a call. A
  * {@link ReentrantLock} and futures are used, so a waiting virtual thread is never pinned.
  */
@@ -71,7 +79,8 @@ public class LocalSyncLimiter implements RateLimiter {
     private static final class State {
         final ReentrantLock lock = new ReentrantLock();
 
-        long tokens;          // borrowed, unspent and not expired
+        TokenBucketParams params; // the rule parameters the fields below belong to
+        long tokens;         // borrowed, unspent and not expired
         long expiresAtNanos;  // of those tokens
         long toReturn;        // expired and not yet given back
         long lastBatch;       // size of the latest grant
@@ -172,6 +181,7 @@ public class LocalSyncLimiter implements RateLimiter {
                 }
                 state.waiting -= queued; // in the same step as retrying, so the next caller counts only the unserved
                 queued = 0;
+                adopt(state, params);
                 expire(state, now);
                 if (state.tokens >= units) {
                     state.tokens -= units;
@@ -284,7 +294,7 @@ public class LocalSyncLimiter implements RateLimiter {
                 state.lastCallFailed = lease == null;
                 if (lease == null) {
                     state.failedAtNanos = now;
-                } else {
+                } else if (params.equals(state.params)) { // else the rule changed meanwhile: the grant is dropped
                     record(state, lease, now);
                     if (units > 0 && state.tokens >= units) {
                         state.tokens -= units;
@@ -318,6 +328,18 @@ public class LocalSyncLimiter implements RateLimiter {
             state.availableAtNanos = now + wait;
             state.askAgainAtNanos = now + Math.min(wait, horizonNanos);
         }
+    }
+
+    /** Makes the state belong to {@code params}, dropping whatever came from different ones. The lock is held. */
+    private static void adopt(State state, TokenBucketParams params) {
+        if (params.equals(state.params)) {
+            return;
+        }
+        state.params = params; // on a new state, the rest is already empty
+        state.tokens = 0;
+        state.toReturn = 0; // see the class comment: borrowed under other parameters, so never returned either
+        state.lastBatch = 0;
+        state.sharedShort = false;
     }
 
     private static void expire(State state, long now) {

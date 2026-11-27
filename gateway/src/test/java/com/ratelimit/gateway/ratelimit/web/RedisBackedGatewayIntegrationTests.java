@@ -47,7 +47,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
         "gateway.ratelimit.rules[0].algorithm=TOKEN_BUCKET",
         "gateway.ratelimit.rules[0].params.capacity=3",
         "gateway.ratelimit.rules[0].params.refill-per-sec=0.01",
-        // rule 2: the same bucket but LOCAL_SYNC, so it must stay out of Redis
+        // rule 2: the same limit but LOCAL_SYNC
         "gateway.ratelimit.rules[1].id=2",
         "gateway.ratelimit.rules[1].name=tb-local",
         "gateway.ratelimit.rules[1].limit-by=USER",
@@ -159,10 +159,10 @@ class RedisBackedGatewayIntegrationTests {
         assertThat(redis.sync().exists("rl:{-1:" + ip + "}:tb")).isEqualTo(1);
     }
 
-    // ---- LOCAL_SYNC stays in memory ----
+    // ---- LOCAL_SYNC borrows from the same kind of bucket ----
 
     @Test
-    void aLocalSyncRuleIsEnforcedButNeverTouchesRedis() throws Exception {
+    void aLocalSyncRuleIsEnforcedByBorrowingFromRedis() throws Exception {
         String user = uniqueUser();
         String ip = uniqueIp();
         for (int i = 0; i < 3; i++) {
@@ -172,7 +172,8 @@ class RedisBackedGatewayIntegrationTests {
 
         assertThat(rejected.getResponse().getStatus()).isEqualTo(429);
         assertThat(rejected.getResponse().getContentAsString()).contains("\"policy\":\"tb-local\"");
-        assertThat(redis.sync().keys("rl:{2:*")).isEmpty();
+        // the shared bucket: all three tokens were lent out
+        assertThat(Double.parseDouble(redis.sync().hget("rl:{2:" + user + "}:tb", "tokens"))).isLessThan(1);
     }
 
     // ---- sliding window ----

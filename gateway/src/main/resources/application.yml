@@ -15,6 +15,15 @@ gateway:
     heartbeat-interval: 1s
     node-timeout: 3s
 
+  # How LOCAL_SYNC rules borrow tokens from Redis. A batch is the tokens a key is expected to need over one
+  # horizon (never fewer than min-batch) and may be spent for two horizons. The next batch is fetched in the
+  # background once fewer than refill-below of the last one is left (0 turns that off). A longer horizon means
+  # fewer Redis calls, but more tokens held by one gateway where the others cannot use them.
+  lease:
+    min-batch: 1
+    horizon: 1s
+    refill-below: 0.3
+
   # IPs / CIDRs of reverse proxies whose X-Forwarded-For is trusted (e.g. the nginx container).
   # Empty = trust nobody, use the socket address. Override: GATEWAY_TRUSTED_PROXIES=172.18.0.0/16
   trusted-proxies: []

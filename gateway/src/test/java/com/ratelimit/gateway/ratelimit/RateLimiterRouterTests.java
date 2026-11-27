@@ -19,10 +19,12 @@ import org.junit.jupiter.api.Test;
 class RateLimiterRouterTests {
 
     private static final long FROM_MEMORY = 222;
-    private static final long FROM_REDIS = 111;
+    private static final long FROM_STRICT = 111;
+    private static final long FROM_LOCAL_SYNC = 333;
 
     private static final RateLimiter MEMORY = (rule, key, cost) -> Decision.allowed(FROM_MEMORY, 0, 0);
-    private static final RateLimiter REDIS = (rule, key, cost) -> Decision.allowed(FROM_REDIS, 0, 0);
+    private static final RateLimiter STRICT = (rule, key, cost) -> Decision.allowed(FROM_STRICT, 0, 0);
+    private static final RateLimiter LOCAL_SYNC = (rule, key, cost) -> Decision.allowed(FROM_LOCAL_SYNC, 0, 0);
 
     private static Rule rule(String name, Algorithm algorithm, Mode mode, Params params) {
         return new Rule(1, name, LimitBy.USER, null, null, "/a", null, algorithm, mode, FailureMode.LOCAL_FALLBACK, params, 0, 1);
@@ -37,16 +39,16 @@ class RateLimiterRouterTests {
     }
 
     @Test
-    void strictRulesGoToRedisAndLocalSyncRulesStayInMemory() {
-        RateLimiterRouter router = new RateLimiterRouter(MEMORY, REDIS);
+    void withRedisEachModeHasItsOwnLimiter() {
+        RateLimiterRouter router = new RateLimiterRouter(STRICT, LOCAL_SYNC);
 
-        assertThat(limitFor(router, tokenBucket(Mode.STRICT))).isEqualTo(FROM_REDIS);
-        assertThat(limitFor(router, tokenBucket(Mode.LOCAL_SYNC))).isEqualTo(FROM_MEMORY);
+        assertThat(limitFor(router, tokenBucket(Mode.STRICT))).isEqualTo(FROM_STRICT);
+        assertThat(limitFor(router, tokenBucket(Mode.LOCAL_SYNC))).isEqualTo(FROM_LOCAL_SYNC);
     }
 
     @Test
     void withoutRedisEverythingStaysInMemory() {
-        RateLimiterRouter router = new RateLimiterRouter(MEMORY, null);
+        RateLimiterRouter router = new RateLimiterRouter(MEMORY);
 
         assertThat(limitFor(router, tokenBucket(Mode.STRICT))).isEqualTo(FROM_MEMORY);
         assertThat(limitFor(router, tokenBucket(Mode.LOCAL_SYNC))).isEqualTo(FROM_MEMORY);
@@ -56,7 +58,7 @@ class RateLimiterRouterTests {
     void theKeyAndCostArePassedThrough() {
         RateLimiter echo = (rule, key, cost) -> Decision.allowed(key.length(), cost, 0);
 
-        Decision d = new RateLimiterRouter(MEMORY, echo).acquire(tokenBucket(Mode.STRICT), "alice", 3);
+        Decision d = new RateLimiterRouter(echo, LOCAL_SYNC).acquire(tokenBucket(Mode.STRICT), "alice", 3);
 
         assertThat(d.limit()).isEqualTo(5);
         assertThat(d.remaining()).isEqualTo(3);

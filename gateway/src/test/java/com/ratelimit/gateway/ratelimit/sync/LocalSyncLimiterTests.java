@@ -490,6 +490,97 @@ class LocalSyncLimiterTests {
         assertThat(lastCall().returned()).isEqualTo(2 + granted - 1);
     }
 
+    // ---- the rule changes ----
+
+    @Test
+    void afterALimitIsLoweredTheTokensBorrowedBeforeAreNeitherSpentNorGivenBack() {
+        var big = new FakeSharedBucket(1_000);
+        var limiter = build(big, 100, 0, refills::add);
+        limiter.acquire(TestRules.tokenBucket(ID, 1_000, 1), "alice", 1); // holds 99
+
+        Rule lowered = TestRules.tokenBucket(ID, 5, 1);
+
+        assertThat(allowed(limiter, lowered, "alice", 200)).as("the new limit, nothing on top").isEqualTo(5);
+        assertThat(big.calls.get(1).returned()).isZero();
+    }
+
+    @Test
+    void afterALimitIsLoweredSeveralNodesTogetherGetOnlyTheNewLimit() {
+        var big = new FakeSharedBucket(1_000);
+        nodes.set(3);
+        var three = List.of(build(big, 100, 0, refills::add), build(big, 100, 0, refills::add),
+                build(big, 100, 0, refills::add));
+        Rule generous = TestRules.tokenBucket(ID, 1_000, 1);
+        three.forEach(node -> node.acquire(generous, "alice", 1)); // each is now holding 99
+
+        Rule lowered = TestRules.tokenBucket(ID, 5, 1);
+        long allowed = 0;
+        for (int i = 0; i < 90; i++) {
+            if (three.get(i % 3).acquire(lowered, "alice", 1).allowed()) {
+                allowed++;
+            }
+        }
+
+        // had each node given its old tokens back, every return would have topped the bucket up to 5 again
+        assertThat(allowed).isEqualTo(5);
+    }
+
+    @Test
+    void expiredTokensAwaitingReturnAreDroppedWhenTheRuleChanges() {
+        var small = new FakeSharedBucket(10);
+        var limiter = build(small, 10, 0, refills::add);
+        Rule costly = TestRules.tokenBucket(ID, 100, 1, 4);
+        allowed(limiter, costly, "alice", 2); // holds 2
+        small.failure = new IllegalStateException("never answered");
+        clock.advanceMillis(1_500);
+        limiter.acquire(costly, "alice", 1);
+        small.failure = null;
+        clock.advanceMillis(500); // the 2 expire and now wait to be returned
+
+        limiter.acquire(TestRules.tokenBucket(ID, 50, 1), "alice", 1);
+
+        assertThat(small.calls.get(small.calls.size() - 1).returned()).isZero();
+    }
+
+    @Test
+    void aChangedRuleIsAskedAboutAtOnceEvenIfTheSharedBucketWasEmpty() {
+        var limiter = limiter(100);
+        shared.waitMsWhenShort = 60_000;
+        assertThat(allowed(limiter, RULE, "alice", 101)).isEqualTo(100);
+        shared.add(ID, "alice", 50); // the new refill rate has already put tokens back
+
+        assertThat(limiter.acquire(TestRules.tokenBucket(ID, 100, 1_000), "alice", 1).allowed()).isTrue();
+    }
+
+    @Test
+    void anEqualRuleReadAgainChangesNothing() {
+        var limiter = limiter(10);
+        limiter.acquire(RULE, "alice", 1);
+
+        limiter.acquire(TestRules.tokenBucket(ID, 100, 1), "alice", 1); // another object, the same parameters
+
+        assertThat(shared.calls).hasSize(1);
+    }
+
+    @Test
+    void aReplyToACallMadeUnderTheOldRuleIsThrownAway() throws InterruptedException {
+        var limiter = refilling(10);
+        allowed(limiter, RULE, "alice", 8); // 2 left, and a refill under the old rule is on its way
+        Rule changed = TestRules.tokenBucket(ID, 50, 1);
+        var decisions = new ArrayList<Decision>();
+        Thread underNewRule = Thread.ofPlatform().start(() -> decisions.add(limiter.acquire(changed, "alice", 1)));
+        await().atMost(Duration.ofSeconds(5)).until(() -> underNewRule.getState() == Thread.State.WAITING);
+
+        refills.poll().run(); // only the old rule's refill: its reply arrives after the change
+        assertThat(underNewRule.join(Duration.ofSeconds(5))).isTrue();
+
+        assertThat(decisions).hasSize(1).allMatch(Decision::allowed);
+        // it did not make do with the late grant: it borrowed for itself, and gave neither that nor the 2 back
+        assertThat(shared.calls).hasSize(3);
+        assertThat(lastCall().need()).isEqualTo(1);
+        assertThat(lastCall().returned()).isZero();
+    }
+
     // ---- batches follow demand ----
 
     /** One request every {@code gapMs}, with any refill finishing before the next. */

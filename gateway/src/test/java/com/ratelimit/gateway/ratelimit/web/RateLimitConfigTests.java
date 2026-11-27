@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ratelimit.gateway.ratelimit.RateLimiterRouter;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
+import com.ratelimit.gateway.ratelimit.sync.ClusterProperties;
+import com.ratelimit.gateway.ratelimit.sync.LeaseProperties;
+import com.ratelimit.gateway.ratelimit.sync.SyncConfig;
 import com.ratelimit.gateway.redis.RedisConfig;
 import com.ratelimit.gateway.redis.RedisProperties;
 import com.ratelimit.gateway.rules.RulesConfig;
@@ -24,7 +27,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class RateLimitConfigTests {
 
     @Configuration
-    @EnableConfigurationProperties({RulesProperties.class, RedisProperties.class})
+    @EnableConfigurationProperties(
+            {RulesProperties.class, RedisProperties.class, ClusterProperties.class, LeaseProperties.class})
     static class Props {
     }
 
@@ -32,7 +36,8 @@ class RateLimitConfigTests {
     static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
-            .withUserConfiguration(Props.class, RedisConfig.class, RulesConfig.class, RateLimitConfig.class)
+            .withUserConfiguration(
+                    Props.class, RedisConfig.class, RulesConfig.class, SyncConfig.class, RateLimitConfig.class)
             .withPropertyValues("gateway.ratelimit.snapshot-file="); // never pick up a saved copy from this machine
 
     private static String redisUrl() {
@@ -100,6 +105,12 @@ class RateLimitConfigTests {
                 rule(1, "sw", "SLIDING_WINDOW_LOG", "STRICT", "limit=5", "window-ms=1000"),
                 rule(2, "lb", "LEAKY_BUCKET_QUEUE", "STRICT", "drain-per-sec=10", "queue-capacity=5")))
                 .run(ctx -> assertThat(ctx).hasNotFailed());
+    }
+
+    @Test
+    void impossibleBorrowingSettingsStopStartup() {
+        runner.withPropertyValues(redisUrl(), "gateway.lease.refill-below=1.5")
+                .run(ctx -> assertThat(ctx.getStartupFailure()).hasStackTraceContaining("refill-below"));
     }
 
     @Test
