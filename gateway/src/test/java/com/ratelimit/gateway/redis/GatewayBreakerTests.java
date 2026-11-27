@@ -68,6 +68,8 @@ class GatewayBreakerTests {
                 "--gateway.auth.api-keys[0].tier=free",
                 rule + "id=10", rule + "name=images", rule + "limit-by=USER",
                 rule + "endpoint-pattern=/api/images/**", rule + "algorithm=TOKEN_BUCKET", rule + "mode=" + mode,
+                // so that an unchecked request can be told apart: a local fallback would look like Redis answering
+                rule + "failure-mode=FAIL_OPEN",
                 rule + "params.capacity=1000", rule + "params.refill-per-sec=1",
                 "--gateway.proxy.routes[0].pattern=/api/images/**",
                 "--gateway.proxy.routes[0].service=images",

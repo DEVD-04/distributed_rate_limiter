@@ -1,8 +1,10 @@
 package com.ratelimit.gateway.ratelimit.web;
 
+import com.ratelimit.gateway.ratelimit.FailureModeLimiter;
 import com.ratelimit.gateway.ratelimit.RateLimiterRouter;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.ratelimit.local.InMemoryRateLimiter;
+import com.ratelimit.gateway.ratelimit.local.LocalShareLimiter;
 import com.ratelimit.gateway.ratelimit.strict.StrictRedisLimiter;
 import com.ratelimit.gateway.ratelimit.sync.LeaseProperties;
 import com.ratelimit.gateway.ratelimit.sync.LeaseSettings;
@@ -14,6 +16,7 @@ import com.ratelimit.gateway.redis.RedisConnector;
 import com.ratelimit.gateway.rules.LiveRuleResolver;
 import com.ratelimit.gateway.rules.RulesProperties;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -48,10 +51,15 @@ public class RateLimitConfig {
         }
         LeaseSettings lease = leaseProperties.settings();
         RedisBreaker breaker = breakers.getObject(); // one for every call limiting depends on
+        NodeRegistry registry = nodes.getObject();
+        var waiting = new Semaphore(properties.maxWaiting()); // leaky-bucket requests held, by whichever limiter
+        // decides what Redis cannot be used for, for both modes, by the rule's failure_mode
+        var onFailure = new FailureModeLimiter(
+                new LocalShareLimiter(registry::nodeCount, properties.maxKeys(), waiting), breaker::retryAfter);
         var localSync = new LocalSyncLimiter(
                 new TokenLeaseClient(connector::connection, breaker),
-                nodes.getObject()::nodeCount,
-                new InMemoryRateLimiter(properties.maxKeys()), // when no tokens can be borrowed
+                registry::nodeCount,
+                onFailure,
                 lease,
                 properties.maxKeys(),
                 task -> Thread.ofVirtual().name("token-refill").start(task),
@@ -60,6 +68,6 @@ public class RateLimitConfig {
                         + "(minimum batch {}, horizon {} ms, refill below {})",
                 lease.minBatch(), lease.horizon().toMillis(), lease.refillBelow());
         return new RateLimiterRouter(
-                new StrictRedisLimiter(connector::connection, properties.maxWaiting(), breaker), localSync);
+                new StrictRedisLimiter(connector::connection, waiting, breaker, onFailure), localSync);
     }
 }

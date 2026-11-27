@@ -29,6 +29,11 @@ public record Decision(
         return new Decision(true, limit, limit, 0, 0, 0, Reason.LIMITER_UNAVAILABLE);
     }
 
+    /** The limiter could not decide (shared store down) and the rule says to refuse; nothing is known of the usage. */
+    public static Decision failedClosed(long limit, long retryAfterMs) {
+        return new Decision(false, limit, 0, retryAfterMs, 0, 0, Reason.FAILED_CLOSED);
+    }
+
     /** Turned away because the leaky bucket queue is full; {@code retryAfterMs} is when it will have room. */
     public static Decision queueFull(long limit, long retryAfterMs, long resetMs) {
         return new Decision(false, limit, 0, retryAfterMs, resetMs, 0, Reason.QUEUE_FULL);

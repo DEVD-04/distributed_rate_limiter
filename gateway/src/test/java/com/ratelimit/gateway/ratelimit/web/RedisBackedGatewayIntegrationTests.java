@@ -88,6 +88,9 @@ class RedisBackedGatewayIntegrationTests {
     @DynamicPropertySource
     static void configure(DynamicPropertyRegistry registry) {
         registry.add("gateway.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+        // these tests are about limiting: on a busy machine a call over the 15 ms default would be decided
+        // by the failure_mode instead, from a local bucket that starts empty
+        registry.add("gateway.redis.command-timeout", () -> "500ms");
         registry.add("gateway.auth.jwt.issuer", () -> TokenFactory.ISSUER);
         registry.add("gateway.auth.jwt.audience", () -> TokenFactory.AUDIENCE);
         registry.add("gateway.auth.jwt.public-keys.k1", () -> TokenFactory.publicPem(KEYS));

@@ -47,8 +47,9 @@ import org.slf4j.LoggerFactory;
  * that wait is over, or after a horizon if sooner, because other nodes may give tokens back; and at once
  * if this node itself has expired tokens to give back.
  *
- * <p>If a lease call fails, the requests that were waiting for it go to the fallback limiter. Tokens
- * already borrowed are still spent until they expire.
+ * <p>If a lease call fails, the requests that were waiting for it go to the fallback limiter, which in a
+ * gateway applies the rule's {@code failure_mode}. Tokens already borrowed are still spent until they
+ * expire, whatever that mode is.
  *
  * <p><b>When a rule's parameters change</b>, what was borrowed under the old ones is thrown away: not spent
  * and <em>not given back</em>, and so is a grant that arrives for a call made under them. Giving them back
@@ -405,7 +406,8 @@ public class LocalSyncLimiter implements RateLimiter {
         long now = nanoClock.getAsLong();
         long last = lastFailureLogNanos.get();
         if (now - last >= LOG_INTERVAL_NANOS && lastFailureLogNanos.compareAndSet(last, now)) {
-            log.error("Cannot borrow tokens, limiting on this node alone (rule '{}'): {}", rule.name(), e.toString());
+            log.error("Cannot borrow tokens, applying failure_mode once borrowed ones run out (rule '{}': {}): {}",
+                    rule.name(), rule.failureMode(), e.toString());
         }
     }
 }

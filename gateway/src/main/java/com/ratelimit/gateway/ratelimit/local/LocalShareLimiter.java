@@ -70,14 +70,24 @@ public class LocalShareLimiter implements RateLimiter {
      * @param maxWaiting how many leaky-bucket requests this node may hold at once; more are turned away
      */
     public LocalShareLimiter(IntSupplier nodeCount, long maxKeys, int maxWaiting) {
-        this(nodeCount, maxKeys, maxWaiting, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
+        this(nodeCount, maxKeys, new Semaphore(maxWaiting));
+    }
+
+    /** @param waiting as above, but a bound shared with whatever else holds leaky-bucket requests on this node */
+    public LocalShareLimiter(IntSupplier nodeCount, long maxKeys, Semaphore waiting) {
+        this(nodeCount, maxKeys, waiting, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
     }
 
     LocalShareLimiter(IntSupplier nodeCount, long maxKeys, int maxWaiting, LongSupplier nanoClock, Sleeper sleeper) {
+        this(nodeCount, maxKeys, new Semaphore(maxWaiting), nanoClock, sleeper);
+    }
+
+    private LocalShareLimiter(IntSupplier nodeCount, long maxKeys, Semaphore waiting, LongSupplier nanoClock,
+            Sleeper sleeper) {
         this.nodeCount = nodeCount;
         this.nanoClock = nanoClock;
         this.sleeper = sleeper;
-        this.waiting = new Semaphore(maxWaiting);
+        this.waiting = waiting;
         this.tokenBuckets = new InMemoryRateLimiter(nanoClock, maxKeys);
         this.windows = cache(maxKeys, nanoClock);
         this.queues = cache(maxKeys, nanoClock);

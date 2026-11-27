@@ -5,6 +5,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig.SlidingWindowType;
 import io.lettuce.core.RedisCommandInterruptedException;
+import java.time.Duration;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,8 +28,10 @@ public class RedisBreaker {
     private static final Logger log = LoggerFactory.getLogger(RedisBreaker.class);
 
     private final CircuitBreaker breaker; // null: no breaker, every call is made
+    private final Duration openFor;
 
     public RedisBreaker(RedisBreakerProperties settings) {
+        this.openFor = settings.openFor();
         this.breaker = CircuitBreaker.of("redis", CircuitBreakerConfig.custom()
                 .slidingWindowType(SlidingWindowType.COUNT_BASED)
                 .slidingWindowSize(settings.window())
@@ -55,6 +58,7 @@ public class RedisBreaker {
 
     private RedisBreaker() {
         this.breaker = null;
+        this.openFor = Duration.ZERO;
     }
 
     /** Makes every call: for tests of the things that use a breaker. */
@@ -77,6 +81,15 @@ public class RedisBreaker {
         } catch (CallNotPermittedException e) {
             throw new RedisSkippedException();
         }
+    }
+
+    /**
+     * What to tell a client that could not be served because of Redis to wait: the full open period while
+     * the breaker is not closed (it does not say how much of it is left), otherwise a second, since a single
+     * call failed and the next may well succeed.
+     */
+    public Duration retryAfter() {
+        return isClosed() ? Duration.ofSeconds(1) : openFor;
     }
 
     /** Whether Redis is currently being called normally (the breaker is neither open nor half open). */

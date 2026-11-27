@@ -6,6 +6,8 @@ public enum Reason {
     LIMIT_EXCEEDED,
     /** The leaky bucket queue was full (or the node had too many waiting requests), so the request was turned away. */
     QUEUE_FULL,
-    /** The shared store could not be reached, so the request was let through (until failure modes exist). */
-    LIMITER_UNAVAILABLE
+    /** The shared store could not be used and the rule fails open, so the request was let through unchecked. */
+    LIMITER_UNAVAILABLE,
+    /** The shared store could not be used and the rule fails closed, so the request was refused. */
+    FAILED_CLOSED
 }

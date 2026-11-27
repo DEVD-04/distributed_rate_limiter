@@ -59,7 +59,7 @@ public final class StubUpstream implements AutoCloseable {
         return "http://127.0.0.1:" + server.getAddress().getPort();
     }
 
-    int requests() {
+    public int requests() {
         return requests.get();
     }
 

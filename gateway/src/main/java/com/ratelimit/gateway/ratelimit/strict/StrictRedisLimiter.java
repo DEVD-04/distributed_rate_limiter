@@ -1,5 +1,6 @@
 package com.ratelimit.gateway.ratelimit.strict;
 
+import com.ratelimit.gateway.ratelimit.FailureModeLimiter;
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.redis.LuaScript;
@@ -26,9 +27,9 @@ import org.slf4j.LoggerFactory;
  * <p>All time in the scripts comes from Redis ({@code TIME}), never from a gateway clock, so nodes
  * with different clocks cannot disagree.
  *
- * <p>If Redis cannot be reached the request is let through and an error is logged (at most every ten
- * seconds, so an outage does not flood the log). That is a stop-gap: per-rule {@code failure_mode}
- * handling replaces it in the resilience phase.
+ * <p>If a call to Redis fails, times out or is skipped by the circuit breaker, the request is handed to
+ * the failure limiter, which applies the rule's {@code failure_mode}. An error is logged at most every ten
+ * seconds, so an outage does not flood the log.
  */
 public class StrictRedisLimiter implements RateLimiter {
 
@@ -116,8 +117,10 @@ public class StrictRedisLimiter implements RateLimiter {
     private final Supplier<StatefulRedisConnection<String, String>> connection;
     private final Semaphore waiting;
     private final RedisBreaker breaker;
+    private final RateLimiter onFailure;
     private final AtomicLong lastFailureLogNanos = new AtomicLong(System.nanoTime() - LOG_INTERVAL_NANOS);
 
+    /** This and the next two constructors are for tests of the limiting itself: no breaker, failures let through. */
     public StrictRedisLimiter(StatefulRedisConnection<String, String> connection) {
         this(connection, DEFAULT_MAX_WAITING);
     }
@@ -132,15 +135,21 @@ public class StrictRedisLimiter implements RateLimiter {
      *                   handled like any other Redis failure
      */
     public StrictRedisLimiter(Supplier<StatefulRedisConnection<String, String>> connection, int maxWaiting) {
-        this(connection, maxWaiting, RedisBreaker.disabled());
+        this(connection, new Semaphore(maxWaiting), RedisBreaker.disabled(), FailureModeLimiter.alwaysOpen());
     }
 
-    /** @param breaker decides whether Redis is called at all; a skipped call is handled like a failed one */
-    public StrictRedisLimiter(Supplier<StatefulRedisConnection<String, String>> connection, int maxWaiting,
-            RedisBreaker breaker) {
+    /**
+     * @param waiting   a permit for each leaky-bucket request this node holds; shared with whatever else holds
+     *                  such requests, so that the bound is on the node as a whole
+     * @param breaker   decides whether Redis is called at all; a skipped call is handled like a failed one
+     * @param onFailure decides a request that Redis could not be used for
+     */
+    public StrictRedisLimiter(Supplier<StatefulRedisConnection<String, String>> connection, Semaphore waiting,
+            RedisBreaker breaker, RateLimiter onFailure) {
         this.connection = connection;
-        this.waiting = new Semaphore(maxWaiting);
+        this.waiting = waiting;
         this.breaker = breaker;
+        this.onFailure = onFailure;
     }
 
     @Override
@@ -148,11 +157,13 @@ public class StrictRedisLimiter implements RateLimiter {
         if (cost < 1) {
             throw new IllegalArgumentException("cost must be at least 1, was " + cost);
         }
-        return switch (rule.algorithm()) {
+        Decision decision = switch (rule.algorithm()) {
             case TOKEN_BUCKET -> tokenBucket(rule, key, cost);
             case SLIDING_WINDOW_LOG -> slidingWindow(rule, key, cost);
             case LEAKY_BUCKET_QUEUE -> leakyBucket(rule, key, cost);
         };
+        // asked only now, when the leaky bucket has let go of its waiting permit: the failure limiter may take one
+        return decision != null ? decision : onFailure.acquire(rule, key, cost);
     }
 
     /**
@@ -177,7 +188,7 @@ public class StrictRedisLimiter implements RateLimiter {
                     Double.toString(params.maxWaitMs()),
                     Long.toString((long) Math.ceil(params.maxWaitMs() + intervalMs) + 1000));
             if (result == null) {
-                return Decision.failedOpen(capacity);
+                return null;
             }
             long waitMs = result.get(1);
             long resetMs = result.get(3);
@@ -213,10 +224,7 @@ public class StrictRedisLimiter implements RateLimiter {
                 Double.toString(params.refillPerSec()),
                 Long.toString(units),
                 Long.toString(keyTtlMillis(params)));
-        if (result == null) {
-            return Decision.failedOpen(params.capacity());
-        }
-        return toDecision(params.capacity(), result);
+        return result == null ? null : toDecision(params.capacity(), result);
     }
 
     private Decision slidingWindow(Rule rule, String key, int cost) {
@@ -230,10 +238,7 @@ public class StrictRedisLimiter implements RateLimiter {
                 Long.toString(params.windowMs()),
                 Long.toString(params.limit()),
                 Long.toHexString(ThreadLocalRandom.current().nextLong())); // short unique id: memory is O(limit)
-        if (result == null) {
-            return Decision.failedOpen(params.limit());
-        }
-        return toDecision(params.limit(), result);
+        return result == null ? null : toDecision(params.limit(), result);
     }
 
     private static Decision toDecision(long limit, List<Long> result) {
@@ -265,7 +270,8 @@ public class StrictRedisLimiter implements RateLimiter {
         long now = System.nanoTime();
         long last = lastFailureLogNanos.get();
         if (now - last >= LOG_INTERVAL_NANOS && lastFailureLogNanos.compareAndSet(last, now)) {
-            log.error("Redis limiter unavailable, letting requests through (rule '{}'): {}", rule.name(), e.toString());
+            log.error("Redis limiter unavailable, applying failure_mode (rule '{}': {}): {}",
+                    rule.name(), rule.failureMode(), e.toString());
         }
     }
 }

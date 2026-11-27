@@ -242,28 +242,36 @@ class GatewayRuleLoadingTests {
             var gateway = startGateway(late.url());
 
             long start = System.nanoTime();
-            Decision whileDown = charge(gateway, "alice");
+            Decision whileDown = charge(gateway, "alice"); // by the rule's failure_mode, the default local fallback
             assertThat(whileDown.allowed()).isTrue();
-            assertThat(whileDown.reason()).isEqualTo(Reason.LIMITER_UNAVAILABLE);
             assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(200));
 
             late.start();
             RedisClient lateClient = RedisClient.create(late.url());
             try (var connection = lateClient.connect()) {
                 publish(connection, snapshot(2, images(10, "published-later", 3)));
+
+                await().atMost(Duration.ofSeconds(5))
+                        .until(() -> gateway.getBean(RedisConnector.class).ifConnected().isPresent());
+                assertThat(gateway.getBean(RuleSnapshotLoader.class).refreshFromRedis()).isEqualTo(Refresh.APPLIED);
+
+                assertThat(charge(gateway, "bob").reason()).isEqualTo(Reason.ALLOWED);
+                charge(gateway, "bob");
+                charge(gateway, "bob");
+                assertThat(charge(gateway, "bob").reason()).isEqualTo(Reason.LIMIT_EXCEEDED);
+                // the same answers could come from the local fallback; only Redis leaves a bucket in Redis
+                assertThat(connection.sync().exists("rl:{10:bob}:tb")).isEqualTo(1);
             } finally {
                 lateClient.shutdown();
             }
-
-            await().atMost(Duration.ofSeconds(5))
-                    .until(() -> gateway.getBean(RedisConnector.class).ifConnected().isPresent());
-            assertThat(gateway.getBean(RuleSnapshotLoader.class).refreshFromRedis()).isEqualTo(Refresh.APPLIED);
-
-            assertThat(charge(gateway, "bob").reason()).isEqualTo(Reason.ALLOWED);
-            charge(gateway, "bob");
-            charge(gateway, "bob");
-            assertThat(charge(gateway, "bob").reason()).isEqualTo(Reason.LIMIT_EXCEEDED);
         }
+    }
+
+    /** Charges one request and says whether Redis decided it: only then is there a bucket for the user there. */
+    private static boolean decidedInRedis(ConfigurableApplicationContext gateway,
+            StatefulRedisConnection<String, String> where, String user) {
+        charge(gateway, user);
+        return !where.sync().keys("rl:*:" + user + "}:tb").isEmpty();
     }
 
     /**
@@ -276,16 +284,26 @@ class GatewayRuleLoadingTests {
             late.start();
             // a short breaker wait: this is about reconnecting; recovery with the real wait has its own test
             var gateway = startGateway(late.url(), "--gateway.redis.breaker.open-for=500ms");
-            await().atMost(Duration.ofSeconds(5)).until(() -> charge(gateway, "warm-up").reason() == Reason.ALLOWED);
+            RedisClient lateClient = RedisClient.create(late.url());
+            try (var connection = lateClient.connect()) {
+                await().atMost(Duration.ofSeconds(5)).until(() -> decidedInRedis(gateway, connection, "warm-up"));
 
-            late.stopServer();
-            assertThat(charge(gateway, "alice").reason()).isEqualTo(Reason.LIMITER_UNAVAILABLE);
-            Thread.sleep(12_000); // long enough for the default back-off to have grown well past the limit below
+                late.stopServer();
+                assertThat(charge(gateway, "alice").allowed()).isTrue();
+                Thread.sleep(12_000); // long enough for the default back-off to have grown well past the limit below
 
-            late.startServerAgain();
+                late.startServerAgain();
 
-            await().atMost(Duration.ofSeconds(4)).pollInterval(Duration.ofMillis(100))
-                    .until(() -> charge(gateway, "carol-" + UUID.randomUUID()).reason() == Reason.ALLOWED);
+                // a new connection to look with: the one above backs off before reconnecting, as library defaults do
+                await().atMost(Duration.ofSeconds(4)).pollInterval(Duration.ofMillis(100)).ignoreExceptions()
+                        .until(() -> {
+                            try (var fresh = lateClient.connect()) {
+                                return decidedInRedis(gateway, fresh, "carol-" + UUID.randomUUID());
+                            }
+                        });
+            } finally {
+                lateClient.shutdown();
+            }
         }
     }
 }
