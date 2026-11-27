@@ -100,7 +100,12 @@ class SnapshotPublishingTests {
 
     @BeforeEach
     void freshDatabaseAndRedis() throws Exception {
-        flyway.clean();
+        // The background publisher may be reading the tables just as they are dropped, and PostgreSQL then
+        // breaks the deadlock by failing one side, sometimes the clean. A failed clean changes nothing.
+        await().atMost(Duration.ofSeconds(10)).ignoreExceptions().until(() -> {
+            flyway.clean();
+            return true;
+        });
         flyway.migrate();
         redis.sync().flushall();
         publisher.sync();
