@@ -16,7 +16,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
 | **4 LOCAL_SYNC** | Token leasing, gateway count, refills and expiry; bound and skew tests | **Done**, without `LOCAL_SYNC` for the leaky bucket, which was skipped (545 tests; live 3-gateway proof, results below) |
-| 5 Resilience | Circuit breaker, failure modes, fallback limiter | In progress: step 1 of 4 done (circuit breaker; `failure_mode` is not applied yet) |
+| 5 Resilience | Circuit breaker, failure modes, fallback limiter | In progress: steps 1-2 of 4 done (circuit breaker, local fallback limits; `failure_mode` is not applied yet) |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
 
@@ -318,6 +318,17 @@ subject are escaped), and every key has a TTL.
   heartbeat's call each second lets a gateway with no traffic recover. While it is open no heartbeats are sent, so a
   node whose breaker stays open past the node timeout drops out of the others' count. A skipped call certainly never
   reached Redis, so tokens it would have returned are kept for the next one (after any other failure they are dropped).
+- **Local fallback limits** (`LocalShareLimiter`, for `LOCAL_FALLBACK`; not used by requests until step 3): with N
+  nodes, as last counted, each enforces from its own memory a token bucket of capacity / N refilling at rate / N, a
+  sliding window of limit / N over the same window, or a leaky bucket draining at rate / N. The design only describes
+  the first; the other two are real local versions, so a window stays a window and a queue still queues. Agreed:
+  - A share is never less than one request, so with a limit smaller than N the nodes together can allow N.
+  - The leaky bucket's **longest wait stays the rule's** (proxy timeouts are set with it in mind), so its queue holds
+    about 1/N as many; dividing the queue length and rounding up would make some requests wait longer than the rule
+    allows (queue 2, 3 nodes: 1.5 times as long).
+  - Local state is **kept when Redis recovers** (the design discards it): it refills like any limit, so a Redis that
+    keeps failing does not hand out a new allowance each time.
+  - The `X-RateLimit-*` headers describe the node's share, which is what it enforces.
 - **Request guard:** non-canonical paths (`..`, `//`, `%2e`, `%2f`, `;` …) get 400 so the path rules match is
   the path that is forwarded. TRACE / CONNECT get 405.
 - **Passive health:** connection errors, timeouts and 502/503/504 count against an instance; a plain 500 does not.
