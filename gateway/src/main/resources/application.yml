@@ -9,6 +9,12 @@ server:
   port: 8080
 
 gateway:
+  # With Redis configured, each gateway reports itself this often; those heard from within node-timeout count
+  # as running, which sets each one's share of a LOCAL_SYNC bucket. Give every gateway the same values.
+  cluster:
+    heartbeat-interval: 1s
+    node-timeout: 3s
+
   # IPs / CIDRs of reverse proxies whose X-Forwarded-For is trusted (e.g. the nginx container).
   # Empty = trust nobody, use the socket address. Override: GATEWAY_TRUSTED_PROXIES=172.18.0.0/16
   trusted-proxies: []

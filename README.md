@@ -15,7 +15,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
-| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: step 1 of 7 done (borrowing script; gateways do not use it yet) |
+| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-2 of 7 done (borrowing script, node count; limits do not use them yet) |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
@@ -168,6 +168,11 @@ Gateways load the configuration from Redis, never from PostgreSQL.
 - `gateway.auth.*`: JWT keys (by `kid`), issuer, audience, leeway; static API keys (used only while no published
   configuration is in force, see below); `public-paths` that skip auth.
 - `gateway.redis.*`: `url` (empty = no Redis), `command-timeout` (15 ms), `connect-timeout` (1 s).
+- `gateway.cluster.*` (with Redis): each node reports itself to the sorted set `rl:nodes` every `heartbeat-interval`
+  (1 s); those heard from within `node-timeout` (3 s, at least two intervals) are counted, which sets each node's share
+  of a `LOCAL_SYNC` bucket. A normal shutdown removes the node at once. While reports fail, the last count is kept.
+  Just after Redis restarts or an outage the count can be low for up to a heartbeat, which only affects fairness.
+  Give every node the same values; gateways sharing a Redis count each other.
 - `gateway.ratelimit.subscribe-to-updates` (default true) and `update-poll-interval` (default 10 s): how a running
   gateway learns of changes (with Redis).
 - `gateway.ratelimit.snapshot-file` (default `data/rules-snapshot.json`, blank = off): where the last applied
