@@ -15,7 +15,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
-| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | Not started |
+| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: step 1 of 7 done (borrowing script; gateways do not use it yet) |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
@@ -262,6 +262,11 @@ subject are escaped), and every key has a TTL.
 - **Leaky bucket:** virtual scheduling, no real queue. Redis stores only the time the next request may be released;
   each request reserves a slot and the gateway sleeps the returned wait on its virtual thread. A refused request reserves
   nothing. The waiter cap is taken before asking Redis, so an overloaded node does not reserve slots it would never use.
+- **Token borrowing (`LOCAL_SYNC`)** uses the same Redis bucket as `STRICT`. Two changes from the design's script:
+  the caller also says how many tokens a waiting request is short of (`need`), which may be granted above the fair
+  share (otherwise, with capacity 10, 3 nodes and a cost of 5, a full bucket's share of 4 refuses the first request),
+  and when the bucket cannot cover it nothing is taken; and the share is `ceil(whole tokens / nodes)`, so a refill
+  fraction cannot raise it.
 - **Request guard:** non-canonical paths (`..`, `//`, `%2e`, `%2f`, `;` …) get 400 so the path rules match is
   the path that is forwarded. TRACE / CONNECT get 405.
 - **Passive health:** connection errors, timeouts and 502/503/504 count against an instance; a plain 500 does not.
@@ -332,6 +337,18 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
 ## Next: Phase 4 (LOCAL_SYNC)
 
 Token leasing for `LOCAL_SYNC` token bucket rules: local buckets refilled by an atomic lease script in Redis, sized
-to each node's demand, node membership by heartbeat, and tests that the cluster never admits more than
-`capacity + refill × time`, including with all of one key's traffic on one node. It replaces today's per-node
+to each node's demand, node membership by heartbeat, `LOCAL_SYNC` for the leaky bucket (approximate: each node
+releases at 1/N of the rate), and tests including all of one key's traffic on one node. It replaces today's per-node
 counting, under which N nodes admit up to N × the limit.
+
+Steps: (1) borrowing script, (2) node count, (3) local tokens, (4) refills and expiry, (5) wiring into the gateway,
+(6) leaky bucket, (7) proof.
+
+Agreed before starting:
+
+- **The limit guarantee is kept as designed, and is narrower than it sounds.** Counted from when the shared bucket was
+  full, the cluster never admits more than `capacity + refill × time`. In a *later* window a burst can reach
+  `capacity + tokens currently borrowed and unspent`, because the shared bucket can refill while nodes still hold
+  tokens. Rules that need an exact limit should use `STRICT`.
+- **If Redis is unreachable,** a node spends what it has borrowed while that is still valid, then limits with its own
+  in-memory bucket (not fail-open), until Phase 5's `failure_mode`.

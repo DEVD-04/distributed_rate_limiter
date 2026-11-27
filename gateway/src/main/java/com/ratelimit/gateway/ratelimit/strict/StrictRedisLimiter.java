@@ -247,7 +247,7 @@ public class StrictRedisLimiter implements RateLimiter {
     }
 
     /** An idle bucket is dropped once it would have refilled completely twice over, plus a second. */
-    static long keyTtlMillis(TokenBucketParams params) {
+    public static long keyTtlMillis(TokenBucketParams params) {
         double fullRefillMs = Math.ceil(params.capacity() * 1000.0 / params.refillPerSec());
         return (long) Math.min(MAX_KEY_TTL_MS, fullRefillMs * 2 + 1000);
     }
