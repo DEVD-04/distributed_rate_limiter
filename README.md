@@ -16,7 +16,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
 | **4 LOCAL_SYNC** | Token leasing, gateway count, refills and expiry; bound and skew tests | **Done**, without `LOCAL_SYNC` for the leaky bucket, which was skipped (545 tests; live 3-gateway proof, results below) |
-| 5 Resilience | Circuit breaker, failure modes, fallback limiter | In progress: steps 1-3 of 4 done (circuit breaker, local fallback limits, `failure_mode` applied) |
+| **5 Resilience** | Circuit breaker, local fallback limits, `failure_mode` | **Done** (594 tests; live 3-gateway proof, results below). Open: the breaker opens too easily on a healthy Redis (see limitations) |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
 
@@ -422,12 +422,71 @@ IP rule, whose one key is busy. `LOCAL_SYNC` pays off for keys that are busy on 
 - Measurement note: on Windows a sleeping thread wakes on a ~15 ms timer tick, so a load generator that sleeps between
   calls inflates latency by that much. The benchmark spins instead.
 
+#### Redis failures (Phase 5)
+
+3 gateway processes with default settings, each request sent to one at random. The laptop had 2.3–4 GB of memory free
+for 7 Java processes and Docker.
+
+**Redis unavailable for 15 s under load**, once stopped and once frozen (`docker pause`). Six rules ran at once (both
+modes × the three failure modes), capacity 100 with practically no refill, 50 requests/s each, and each rule's 100
+were already used up when Redis went away. About 750 requests per rule arrived during each outage:
+
+| `failure_mode` | Admitted during the outage, `STRICT` / `LOCAL_SYNC` | The rest |
+|---|---|---|
+| `FAIL_OPEN` | 734–744 / 697–698 | 429, from before Redis was fully gone (and, for `LOCAL_SYNC`, "no tokens" still believed) |
+| `FAIL_CLOSED` | 0 / 0 | 503 (690–743), and such 429s |
+| `LOCAL_FALLBACK` | **99 / 99** (33 per node) | 429. The cluster admitted 199 for a limit of 100 |
+
+- None of the 10,500 requests in either run failed or got any other status.
+- Latency p99, end to end: 5.1–6.5 ms with Redis healthy; in the first 2 s after it went, 8.3 ms (stopped) and 49 ms
+  (frozen, where calls wait out the timeout until the breakers open); after that 3.2–3.5 ms, since nothing waits for
+  Redis.
+- Redis was deciding `STRICT` requests again on all three gateways 5.5 s after the restart command, and 0.3–0.5 s
+  after the unfreeze command. The difference is mostly where the breaker's 5 s wait stood at that moment.
+- After the restart Redis comes back empty, and the `FAIL_CLOSED` and `LOCAL_FALLBACK` rules then admitted exactly 100
+  again (a `FAIL_OPEN` rule's count also includes what passed unchecked before Redis was deciding, so it does not show
+  this). After the unfreeze the used-up buckets were still used up.
+
+**Bursts on warm gateways, Redis healthy** (capacity 200, refill 200/s: 150 requests/s for 5 s, 1 s of quiet, 800
+requests at once, then 150/s for 6 s; four bursts each):
+
+| Mode, `failure_mode` | Admitted in the burst (capacity + refill: 228–290) | Decided without Redis, of the 800 | Without Redis in the next 6 s, of 900 |
+|---|---|---|---|
+| `STRICT`, `LOCAL_FALLBACK` | 250–433 | 556–770 | 719–735 |
+| `STRICT`, `FAIL_OPEN` | 264–781 | 2–554 | 0–725 |
+| `STRICT`, `FAIL_CLOSED` | 99–200 | 544–701, all **503** | 708–729, all **503** |
+| `LOCAL_SYNC`, `LOCAL_FALLBACK` | 314–382 | 0 | 0 |
+
+- **A breaker opened on at least one gateway in 11 of the 12 `STRICT` bursts** (on all three in the 8
+  `LOCAL_FALLBACK` and `FAIL_CLOSED` ones), and in none of the `LOCAL_SYNC` ones. The "next 6 s" column is its effect.
+- With `LOCAL_FALLBACK` a burst admitted much less than before failure modes, when `STRICT` failed open and admitted
+  516–749 (Phase 4 conditions, so only roughly comparable).
+- `LOCAL_SYNC` was 86–145 above capacity plus refill with nothing decided without Redis, which is within what nodes
+  can be holding. In Phase 4's runs that excess was 14–52; why it differs was not investigated.
+
+**Just-started gateways**, 300 requests/s from the first request, 6,000 requests, three runs each. Every setup was
+very slow in its first seconds (median up to several seconds, and with `FAIL_OPEN` some 502/504 from the proxy),
+with and without a breaker, probably the laptop's low free memory (not verified). So these cannot be compared with
+Phase 3's cold starts.
+
+| Mode | Not decided by Redis | of those in seconds 10–20 |
+|---|---|---|
+| `STRICT`, breaker on | 2,339–3,251 | 158–270 |
+| `STRICT`, breaker effectively off (alternating runs, same build) | 610–1,626 | 0 |
+| `LOCAL_SYNC`, breaker on (run later, with more memory free) | 1,146–1,738, here **503** (`FAIL_CLOSED`) | 0 |
+
+So at startup the breaker leaves **more** requests undecided, and for longer. In seconds 5–10 median latency was lower
+with it (about 5–7 ms against 140–470 ms). (`STRICT` runs used `FAIL_OPEN` and `LOCAL_SYNC` runs `FAIL_CLOSED`, so that
+an undecided request can be told apart.)
+
 ## Known limitations
 
-- **An open breaker applies `failure_mode` even if Redis is healthy.** A burst or a cold start can open it. For at
-  least 5 s that node then holds `LOCAL_FALLBACK` rules to its share (even if it gets most of the traffic), lets
-  `FAIL_OPEN` requests through, and answers `FAIL_CLOSED` ones with 503; `LOCAL_SYNC` rules are affected once
-  borrowed tokens run out. How often this happens has not been measured yet (step 4).
+- **The breaker opens too easily on a healthy Redis** with the design's settings (15 ms timeout; 50% of 20 calls;
+  open 5 s): in 11 of 12 `STRICT` bursts of 800, and on just-started gateways (measured above). For at least 5 s such a
+  node holds `LOCAL_FALLBACK` rules to its share (even if it gets most of the traffic), lets `FAIL_OPEN` requests
+  through, and answers `FAIL_CLOSED` ones with **503: most requests in the 6 s after a burst**. `LOCAL_SYNC` rules are
+  affected once borrowed tokens run out. Candidates to try, none measured: a longer command timeout, a larger window,
+  a shorter open time. Do not rely on `FAIL_CLOSED` for traffic that bursts until this is tuned.
 - **`LOCAL_FALLBACK` is approximate.** A node's share starts unused whatever was already spent in Redis, so during an
   outage or a burst of timeouts the cluster can admit about one extra limit on top of what Redis admitted, plus
   refill; with a limit smaller than N, up to N. Uneven traffic is held to 1/N on the busy node. A node that has never
@@ -435,19 +494,10 @@ IP rule, whose one key is busy. `LOCAL_SYNC` pays off for keys that are busy on 
   go to the local queue, which starts empty, so requests are briefly released faster than the rule's rate.
 - **Limits resume later after an outage than before the breaker:** it may be nearly 5 s into its wait when Redis
   returns. In a test with one gateway, restarting Redis at 7 different points of that cycle, checks resumed 1.1–5.7 s
-  after Redis was started (about 1.5 s before the breaker).
+  after Redis was started (about 1.5 s before the breaker); 3 gateways took 5.5 s once.
 - **`STRICT` is exact only while every Redis call answers within the 15 ms timeout**, which can fail with Redis
   healthy: on a freshly started gateway, and in a sudden burst on a warm one. Such a request is decided by its
-  rule's `failure_mode`. Measured before `failure_mode` was applied, when every such request was let through (to be
-  measured again in step 4):
-  - *Bursts:* with 800 requests at once on 3 warm gateways (capacity 200, refill 200/s), 261–693 of them passed
-    unchecked in the four bursts where this was counted, and 516–749 were admitted. The ones Redis did check stayed
-    within the limit (56–255).
-  - *Cold start:* calls are slow while the JVM warms up. At 300 requests/s over three just-started gateways, one run
-    had 172 of 1,200 requests unchecked in the first 4 s (p99 959 ms); another, with the load applied steadily, had
-    18 of about 1,500 in the first 5 s, and none after that at that rate.
-  - Warming a node before it takes traffic, or a longer timeout, would reduce the timeouts. `LOCAL_SYNC` lease calls
-    can time out the same way (measured above, when the fallback was still a full-size bucket on each node).
+  rule's `failure_mode`. Warming a node before it takes traffic would reduce this.
 - While gateways are switching to a new rule (a few milliseconds apart in the measured runs), one may still apply
   the old parameters to the same Redis bucket another is already treating with the new ones.
 - The admin API has no TLS and one shared token, so changes cannot be attributed to a person. Keep it off
@@ -466,14 +516,15 @@ IP rule, whose one key is busy. `LOCAL_SYNC` pays off for keys that are busy on 
 - A request held by a leaky bucket is lost if its node crashes. The proxy read timeout (10 s by default) and any load
   balancer timeout must exceed the longest wait of any leaky rule (up to 60 s).
 - The Lua scripts take time from Redis, so their tests use short real waits and assert bounds; they are timing-based.
-- If the limiter throws something other than a Redis connection error, the request gets a 500.
+- A failed Redis call is handled by `failure_mode`; an error from anywhere else in the limiter gives the request a 500.
 - No metrics yet; failures are only logged.
 - The proxy read timeout covers waiting for response headers, not a stall mid-body. `Location` headers are not rewritten.
 - The path where a client's upload fails mid-request (400, not counted against the upstream) is implemented but untested.
 - Real Tomcat answers TRACE with an empty 405 before the guard filter sees it; the guard's JSON 405 is covered by MockMvc tests only.
 - No `docker-compose.yml` yet; it arrives with the later phases (Postgres, policy service, Prometheus, Grafana).
 
-## Next: Phase 5, step 4 (proof)
+## Next: Phase 6 (observability)
 
-Three gateway processes with Redis stopped and frozen under load, and the burst and cold-start tests run again, to
-measure what the cluster admits with each `failure_mode` and how often a healthy Redis gets the breaker opened.
+Micrometer metrics on `/metrics` (the design's list, including every decision made without Redis and the breaker's
+state), Prometheus and a Grafana dashboard. They would also show how often breakers open in real traffic. Tuning the
+breaker and timeout is open (see limitations); the design leaves tuning to Phase 7.
