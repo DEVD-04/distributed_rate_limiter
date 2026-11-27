@@ -15,7 +15,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
-| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-2 of 7 done (borrowing script, node count; limits do not use them yet) |
+| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-3 of 7 done (borrowing script, node count, local tokens; no rule uses them yet) |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
@@ -272,6 +272,14 @@ subject are escaped), and every key has a TTL.
   share (otherwise, with capacity 10, 3 nodes and a cost of 5, a full bucket's share of 4 refuses the first request),
   and when the bucket cannot cover it nothing is taken; and the share is `ceil(whole tokens / nodes)`, so a refill
   fraction cannot raise it.
+- **When a `LOCAL_SYNC` node lacks the tokens, the request waits for a lease call** (the design blocks only a key's first
+  request, and would refuse others while more are fetched in the background, so a burst larger than the batch, or a user
+  coming back, could be refused although the shared bucket has tokens). One call per (rule, key) is in progress at a
+  time; requests arriving meanwhile share it, and the next call asks for enough for those still unserved. When a reply
+  says the shared bucket cannot cover another request, such requests are refused from memory until the expected time,
+  or for the recheck interval if sooner (other nodes may give tokens back). If a call fails, its waiters use the
+  per-node fallback limiter. Each (rule, key) is guarded by its own lock, never held during a call (the design suggests
+  a CAS counter), and tokens are whole numbers because a node never refills by itself.
 - **Request guard:** non-canonical paths (`..`, `//`, `%2e`, `%2f`, `;` …) get 400 so the path rules match is
   the path that is forwarded. TRACE / CONNECT get 405.
 - **Passive health:** connection errors, timeouts and 502/503/504 count against an instance; a plain 500 does not.

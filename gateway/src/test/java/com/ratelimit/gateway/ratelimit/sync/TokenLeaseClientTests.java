@@ -5,7 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.ratelimit.gateway.ratelimit.TestRules;
 import com.ratelimit.gateway.ratelimit.strict.StrictRedisLimiter;
-import com.ratelimit.gateway.ratelimit.sync.TokenLeaseClient.Lease;
+import com.ratelimit.gateway.ratelimit.sync.LeaseSource.Lease;
 import com.ratelimit.gateway.redis.RedisKeys;
 import com.ratelimit.rules.TokenBucketParams;
 import io.lettuce.core.RedisClient;
