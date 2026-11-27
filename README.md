@@ -16,7 +16,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
 | **4 LOCAL_SYNC** | Token leasing, gateway count, refills and expiry; bound and skew tests | **Done**, without `LOCAL_SYNC` for the leaky bucket, which was skipped (545 tests; live 3-gateway proof, results below) |
-| 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
+| 5 Resilience | Circuit breaker, failure modes, fallback limiter | In progress: step 1 of 4 done (circuit breaker; `failure_mode` is not applied yet) |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
 
@@ -168,6 +168,8 @@ Gateways load the configuration from Redis, never from PostgreSQL.
 - `gateway.auth.*`: JWT keys (by `kid`), issuer, audience, leeway; static API keys (used only while no published
   configuration is in force, see below); `public-paths` that skip auth.
 - `gateway.redis.*`: `url` (empty = no Redis), `command-timeout` (15 ms), `connect-timeout` (1 s).
+- `gateway.redis.breaker.*`: `window` (20), `failure-rate-threshold` (50 %), `open-for` (5 s), `probes` (3); see
+  "Circuit breaker" under "Decisions".
 - `gateway.cluster.*` (with Redis): each node reports itself to the sorted set `rl:nodes` every `heartbeat-interval`
   (1 s); those heard from within `node-timeout` (3 s, at least two intervals) are counted, which sets each node's share
   of a `LOCAL_SYNC` bucket. A normal shutdown removes the node at once. While reports fail, the last count is kept.
@@ -309,6 +311,13 @@ subject are escaped), and every key has a TTL.
   with its own in-memory bucket (not fail-open; agreed), until Phase 5's `failure_mode`.
 - **`LOCAL_SYNC` for the leaky bucket (design 6.3) is not built**, by choice. The design's version, each node releasing
   at 1/N of the rate, is only approximate. The policy service and the gateway refuse such a rule; use `STRICT`.
+- **Circuit breaker** (Resilience4j, design's settings): one per gateway, around limit checks, token borrowing and
+  heartbeats, which fail together. When at least half of the latest 20 calls failed it opens, and calls are skipped at
+  once, with no 15 ms wait and no load on Redis; after 5 s, 3 trial calls decide. Loading rules is not behind it, so
+  rules are re-read regardless. Nothing runs on a timer: a trial happens at the first call after the wait, and the
+  heartbeat's call each second lets a gateway with no traffic recover. While it is open no heartbeats are sent, so a
+  node whose breaker stays open past the node timeout drops out of the others' count. A skipped call certainly never
+  reached Redis, so tokens it would have returned are kept for the next one (after any other failure they are dropped).
 - **Request guard:** non-canonical paths (`..`, `//`, `%2e`, `%2f`, `;` …) get 400 so the path rules match is
   the path that is forwarded. TRACE / CONNECT get 405.
 - **Passive health:** connection errors, timeouts and 502/503/504 count against an instance; a plain 500 does not.
@@ -394,6 +403,13 @@ IP rule, whose one key is busy. `LOCAL_SYNC` pays off for keys that are busy on 
 
 ## Known limitations
 
+- **Until Phase 5 step 3, an open breaker makes some of the gaps below worse.** A skipped call is handled like a
+  failed one: for at least 5 s a node lets every `STRICT` request through unchecked, and limits `LOCAL_SYNC` requests
+  that need more tokens with its own full-size bucket. A burst or cold start can open the breaker although Redis is
+  healthy; how often has not been measured yet. Do not deploy this step without step 3.
+- **Limits resume later after an outage than before the breaker:** it may be nearly 5 s into its wait when Redis
+  returns. In a test with one gateway, restarting Redis at 7 different points of that cycle, checks resumed 1.1–5.7 s
+  after Redis was started (about 1.5 s before the breaker).
 - **`STRICT` requests can pass unchecked even with Redis healthy: on a freshly started gateway, and in a sudden
   burst on a warm one.** A Redis call that exceeds the 15 ms command timeout fails, and a failed `STRICT` call is let
   through. So `STRICT` is exact only while every call answers in time.

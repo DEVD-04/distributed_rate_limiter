@@ -7,6 +7,7 @@ import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.ratelimit.sync.ClusterProperties;
 import com.ratelimit.gateway.ratelimit.sync.LeaseProperties;
 import com.ratelimit.gateway.ratelimit.sync.SyncConfig;
+import com.ratelimit.gateway.redis.RedisBreakerProperties;
 import com.ratelimit.gateway.redis.RedisConfig;
 import com.ratelimit.gateway.redis.RedisProperties;
 import com.ratelimit.gateway.rules.RulesConfig;
@@ -27,8 +28,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class RateLimitConfigTests {
 
     @Configuration
-    @EnableConfigurationProperties(
-            {RulesProperties.class, RedisProperties.class, ClusterProperties.class, LeaseProperties.class})
+    @EnableConfigurationProperties({RulesProperties.class, RedisProperties.class, RedisBreakerProperties.class,
+            ClusterProperties.class, LeaseProperties.class})
     static class Props {
     }
 

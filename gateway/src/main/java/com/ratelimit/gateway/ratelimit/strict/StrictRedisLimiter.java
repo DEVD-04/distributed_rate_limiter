@@ -3,6 +3,7 @@ package com.ratelimit.gateway.ratelimit.strict;
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.redis.LuaScript;
+import com.ratelimit.gateway.redis.RedisBreaker;
 import com.ratelimit.gateway.redis.RedisKeys;
 import com.ratelimit.rules.LeakyBucketParams;
 import com.ratelimit.rules.Rule;
@@ -114,6 +115,7 @@ public class StrictRedisLimiter implements RateLimiter {
 
     private final Supplier<StatefulRedisConnection<String, String>> connection;
     private final Semaphore waiting;
+    private final RedisBreaker breaker;
     private final AtomicLong lastFailureLogNanos = new AtomicLong(System.nanoTime() - LOG_INTERVAL_NANOS);
 
     public StrictRedisLimiter(StatefulRedisConnection<String, String> connection) {
@@ -130,8 +132,15 @@ public class StrictRedisLimiter implements RateLimiter {
      *                   handled like any other Redis failure
      */
     public StrictRedisLimiter(Supplier<StatefulRedisConnection<String, String>> connection, int maxWaiting) {
+        this(connection, maxWaiting, RedisBreaker.disabled());
+    }
+
+    /** @param breaker decides whether Redis is called at all; a skipped call is handled like a failed one */
+    public StrictRedisLimiter(Supplier<StatefulRedisConnection<String, String>> connection, int maxWaiting,
+            RedisBreaker breaker) {
         this.connection = connection;
         this.waiting = new Semaphore(maxWaiting);
+        this.breaker = breaker;
     }
 
     @Override
@@ -239,7 +248,7 @@ public class StrictRedisLimiter implements RateLimiter {
     /** @return the script result, or {@code null} if Redis could not be reached (already logged) */
     private List<Long> run(Rule rule, LuaScript script, List<String> keys, String... args) {
         try {
-            return script.run(connection.get(), keys, args);
+            return breaker.call(() -> script.run(connection.get(), keys, args));
         } catch (RuntimeException e) {
             logFailure(rule, e);
             return null;

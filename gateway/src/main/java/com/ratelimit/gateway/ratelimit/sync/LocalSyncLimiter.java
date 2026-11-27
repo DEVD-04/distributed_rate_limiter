@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.ratelimit.sync.LeaseSource.Lease;
+import com.ratelimit.gateway.redis.RedisSkippedException;
 import com.ratelimit.rules.Algorithm;
 import com.ratelimit.rules.Rule;
 import com.ratelimit.rules.TokenBucketParams;
@@ -32,7 +33,8 @@ import org.slf4j.LoggerFactory;
  * <p><b>Borrowed tokens expire.</b> Twice the horizon after the latest grant, what is left may no longer
  * be spent. It is given back with the next call for that (rule, key); if there never is one, it is lost
  * until the shared bucket refills, which only means admitting less. Tokens being returned are taken out
- * of the state before the call, so whatever happens to the call they are not sent again.
+ * of the state before the call, so whatever happens to the call they are not sent again; only a call that
+ * was certainly never made (the circuit breaker was open) keeps them for the next one.
  *
  * <p>When a node does not hold enough for a request, the request waits for a lease call. <b>There is at
  * most one call in progress per (rule, key):</b> requests arriving meanwhile wait for the same one, and
@@ -281,9 +283,13 @@ public class LocalSyncLimiter implements RateLimiter {
         Lease lease = null;
         Decision served = null;
         PendingCall refill = null;
+        boolean notSent = false;
         try {
             lease = source.lease(rule.ruleId(), key, params, call.want(), call.need(), call.returned(),
                     nodeCount.getAsInt());
+        } catch (RedisSkippedException e) {
+            notSent = true;
+            logFailure(rule, e);
         } catch (RuntimeException e) {
             logFailure(rule, e);
         } finally {
@@ -294,6 +300,9 @@ public class LocalSyncLimiter implements RateLimiter {
                 state.lastCallFailed = lease == null;
                 if (lease == null) {
                     state.failedAtNanos = now;
+                    if (notSent && params.equals(state.params)) {
+                        state.toReturn += call.returned(); // Redis never saw them: they can still be given back
+                    }
                 } else if (params.equals(state.params)) { // else the rule changed meanwhile: the grant is dropped
                     record(state, lease, now);
                     if (units > 0 && state.tokens >= units) {

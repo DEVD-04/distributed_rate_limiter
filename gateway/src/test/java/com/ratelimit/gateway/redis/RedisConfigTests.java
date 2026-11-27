@@ -18,7 +18,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class RedisConfigTests {
 
     @Configuration
-    @EnableConfigurationProperties(RedisProperties.class)
+    @EnableConfigurationProperties({RedisProperties.class, RedisBreakerProperties.class})
     static class Props {
     }
 

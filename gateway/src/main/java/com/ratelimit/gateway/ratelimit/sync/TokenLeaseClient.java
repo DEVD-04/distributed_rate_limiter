@@ -2,6 +2,7 @@ package com.ratelimit.gateway.ratelimit.sync;
 
 import com.ratelimit.gateway.ratelimit.strict.StrictRedisLimiter;
 import com.ratelimit.gateway.redis.LuaScript;
+import com.ratelimit.gateway.redis.RedisBreaker;
 import com.ratelimit.gateway.redis.RedisKeys;
 import com.ratelimit.rules.TokenBucketParams;
 import io.lettuce.core.api.StatefulRedisConnection;
@@ -73,9 +74,17 @@ public class TokenLeaseClient implements LeaseSource {
 
     private final Supplier<StatefulRedisConnection<String, String>> connection;
 
+    private final RedisBreaker breaker;
+
     /** @param connection asked for on every call; it may throw while Redis has not been reached */
     public TokenLeaseClient(Supplier<StatefulRedisConnection<String, String>> connection) {
+        this(connection, RedisBreaker.disabled());
+    }
+
+    /** @param breaker decides whether Redis is called at all; see {@link LeaseSource#lease} */
+    public TokenLeaseClient(Supplier<StatefulRedisConnection<String, String>> connection, RedisBreaker breaker) {
         this.connection = connection;
+        this.breaker = breaker;
     }
 
     @Override
@@ -93,7 +102,7 @@ public class TokenLeaseClient implements LeaseSource {
         }
         var random = ThreadLocalRandom.current();
         String callId = Long.toHexString(random.nextLong()) + Long.toHexString(random.nextLong());
-        List<Long> result = LEASE.run(connection.get(),
+        List<Long> result = breaker.call(() -> LEASE.run(connection.get(),
                 List.of(RedisKeys.of(ruleId, subject, "tb"), RedisKeys.of(ruleId, subject, "ret:" + callId)),
                 Long.toString(params.capacity()),
                 Double.toString(params.refillPerSec()),
@@ -102,7 +111,7 @@ public class TokenLeaseClient implements LeaseSource {
                 Long.toString(returned),
                 Integer.toString(nodeCount),
                 Long.toString(StrictRedisLimiter.keyTtlMillis(params)),
-                Long.toString(RETURN_MARKER_TTL_MS));
+                Long.toString(RETURN_MARKER_TTL_MS)));
         return new Lease(result.get(0), result.get(1), result.get(2), result.get(3));
     }
 }

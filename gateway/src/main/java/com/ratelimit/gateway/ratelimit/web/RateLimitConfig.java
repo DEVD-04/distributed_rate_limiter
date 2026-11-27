@@ -9,6 +9,7 @@ import com.ratelimit.gateway.ratelimit.sync.LeaseSettings;
 import com.ratelimit.gateway.ratelimit.sync.LocalSyncLimiter;
 import com.ratelimit.gateway.ratelimit.sync.NodeRegistry;
 import com.ratelimit.gateway.ratelimit.sync.TokenLeaseClient;
+import com.ratelimit.gateway.redis.RedisBreaker;
 import com.ratelimit.gateway.redis.RedisConnector;
 import com.ratelimit.gateway.rules.LiveRuleResolver;
 import com.ratelimit.gateway.rules.RulesProperties;
@@ -32,7 +33,8 @@ public class RateLimitConfig {
      */
     @Bean
     RateLimiter rateLimiter(RulesProperties properties, LiveRuleResolver rules, ObjectProvider<RedisConnector> redis,
-            ObjectProvider<NodeRegistry> nodes, LeaseProperties leaseProperties) {
+            ObjectProvider<NodeRegistry> nodes, ObjectProvider<RedisBreaker> breakers,
+            LeaseProperties leaseProperties) {
         RedisConnector connector = redis.getIfAvailable();
 
         List<String> problems = RateLimiterRouter.unservable(rules.configured().rules(), connector != null);
@@ -45,8 +47,9 @@ public class RateLimitConfig {
             return new RateLimiterRouter(new InMemoryRateLimiter(properties.maxKeys()));
         }
         LeaseSettings lease = leaseProperties.settings();
+        RedisBreaker breaker = breakers.getObject(); // one for every call limiting depends on
         var localSync = new LocalSyncLimiter(
-                new TokenLeaseClient(connector::connection),
+                new TokenLeaseClient(connector::connection, breaker),
                 nodes.getObject()::nodeCount,
                 new InMemoryRateLimiter(properties.maxKeys()), // when no tokens can be borrowed
                 lease,
@@ -56,6 +59,7 @@ public class RateLimitConfig {
         log.info("Rate limiting: STRICT rules in Redis; LOCAL_SYNC rules from tokens borrowed from it "
                         + "(minimum batch {}, horizon {} ms, refill below {})",
                 lease.minBatch(), lease.horizon().toMillis(), lease.refillBelow());
-        return new RateLimiterRouter(new StrictRedisLimiter(connector::connection, properties.maxWaiting()), localSync);
+        return new RateLimiterRouter(
+                new StrictRedisLimiter(connector::connection, properties.maxWaiting(), breaker), localSync);
     }
 }

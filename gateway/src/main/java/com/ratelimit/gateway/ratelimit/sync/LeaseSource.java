@@ -28,6 +28,8 @@ public interface LeaseSource {
      * @param need      tokens a waiting request is short of, or 0 for a top-up
      * @param returned  borrowed tokens the node is giving back unused
      * @param nodeCount gateway nodes currently sharing the bucket, which sets the fair share
+     * @throws com.ratelimit.gateway.redis.RedisSkippedException if the call was not made at all, so nothing
+     *                          took effect and the same returned tokens may safely go with a later call
      * @throws RuntimeException if the shared bucket cannot be reached or does not answer in time
      */
     Lease lease(long ruleId, String subject, TokenBucketParams params,

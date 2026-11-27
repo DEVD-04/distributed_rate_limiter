@@ -9,6 +9,16 @@ server:
   port: 8080
 
 gateway:
+  # With Redis configured: once at least failure-rate-threshold percent of the latest `window` Redis calls have
+  # failed (a call fails after gateway.redis.command-timeout), the gateway stops calling Redis for open-for, then
+  # lets `probes` calls through to decide whether to resume.
+  redis:
+    breaker:
+      window: 20
+      failure-rate-threshold: 50
+      open-for: 5s
+      probes: 3
+
   # With Redis configured, each gateway reports itself this often; those heard from within node-timeout count
   # as running, which sets each one's share of a LOCAL_SYNC bucket. Give every gateway the same values.
   cluster:

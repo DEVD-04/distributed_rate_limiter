@@ -38,6 +38,15 @@ public final class LateRedis implements AutoCloseable {
         container.getDockerClient().startContainerCmd(container.getContainerId()).exec();
     }
 
+    /** Freezes the server: connections stay open and nothing is answered, as with a stalled Redis or network. */
+    public void freeze() {
+        container.getDockerClient().pauseContainerCmd(container.getContainerId()).exec();
+    }
+
+    public void unfreeze() {
+        container.getDockerClient().unpauseContainerCmd(container.getContainerId()).exec();
+    }
+
     @Override
     public void close() {
         container.stop();

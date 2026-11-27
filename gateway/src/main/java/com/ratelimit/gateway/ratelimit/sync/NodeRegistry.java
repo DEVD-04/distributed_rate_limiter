@@ -1,6 +1,7 @@
 package com.ratelimit.gateway.ratelimit.sync;
 
 import com.ratelimit.gateway.redis.LuaScript;
+import com.ratelimit.gateway.redis.RedisBreaker;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.time.Duration;
 import java.util.List;
@@ -45,6 +46,7 @@ public class NodeRegistry implements AutoCloseable {
     private final String nodeId;
     private final Duration interval;
     private final Duration timeout;
+    private final RedisBreaker breaker;
 
     private volatile int nodeCount = 1;
     // used only by the thread that is reporting
@@ -63,6 +65,17 @@ public class NodeRegistry implements AutoCloseable {
      */
     public NodeRegistry(Supplier<StatefulRedisConnection<String, String>> connection, String nodeId,
             Duration interval, Duration timeout) {
+        this(connection, nodeId, interval, timeout, RedisBreaker.disabled());
+    }
+
+    /**
+     * @param breaker decides whether a report is sent at all. While it is open none are, so a node whose
+     *                breaker stays open past the timeout drops out of the others' count. Once the wait is over,
+     *                reports are among the trial calls, which lets a node with no traffic recover.
+     */
+    public NodeRegistry(Supplier<StatefulRedisConnection<String, String>> connection, String nodeId,
+            Duration interval, Duration timeout, RedisBreaker breaker) {
+        this.breaker = breaker;
         if (interval.toMillis() < 1) {
             throw new IllegalArgumentException("heartbeat interval must be at least 1 ms, was " + interval);
         }
@@ -99,7 +112,8 @@ public class NodeRegistry implements AutoCloseable {
     /** One report. Never throws: a periodic task that throws is never run again. */
     void beat() {
         try {
-            List<Long> result = HEARTBEAT.run(connection.get(), List.of(KEY), nodeId, Long.toString(timeout.toMillis()));
+            List<Long> result = breaker.call(() -> HEARTBEAT.run(
+                    connection.get(), List.of(KEY), nodeId, Long.toString(timeout.toMillis())));
             int counted = (int) Math.max(1, result.get(0));
             lastSuccessNanos = System.nanoTime();
             if (warned) {

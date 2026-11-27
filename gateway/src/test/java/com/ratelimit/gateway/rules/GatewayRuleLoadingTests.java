@@ -89,15 +89,18 @@ class GatewayRuleLoadingTests {
         where.sync().hset(SnapshotKeys.KEY, SnapshotKeys.FIELD_SNAPSHOT, snapshot);
     }
 
-    private ConfigurableApplicationContext startGateway(String url) {
-        ConfigurableApplicationContext gateway = new SpringApplicationBuilder(GatewayApplication.class).run(
+    private ConfigurableApplicationContext startGateway(String url, String... extra) {
+        List<String> args = new ArrayList<>(List.of(
                 "--server.port=0",
                 "--gateway.redis.url=" + url,
                 "--gateway.redis.command-timeout=200ms", // generous, so a busy test machine does not fail open
                 // These tests decide when rules are re-read; live updates have their own tests.
                 "--gateway.ratelimit.subscribe-to-updates=false",
                 "--gateway.ratelimit.update-poll-interval=1h",
-                "--gateway.ratelimit.snapshot-file=" + savedCopy());
+                "--gateway.ratelimit.snapshot-file=" + savedCopy()));
+        args.addAll(List.of(extra));
+        ConfigurableApplicationContext gateway =
+                new SpringApplicationBuilder(GatewayApplication.class).run(args.toArray(String[]::new));
         gateways.add(gateway);
         return gateway;
     }
@@ -271,7 +274,8 @@ class GatewayRuleLoadingTests {
     void afterARedisOutageEnforcementResumesWithinSeconds() throws Exception {
         try (LateRedis late = new LateRedis()) {
             late.start();
-            var gateway = startGateway(late.url());
+            // a short breaker wait: this is about reconnecting; recovery with the real wait has its own test
+            var gateway = startGateway(late.url(), "--gateway.redis.breaker.open-for=500ms");
             await().atMost(Duration.ofSeconds(5)).until(() -> charge(gateway, "warm-up").reason() == Reason.ALLOWED);
 
             late.stopServer();

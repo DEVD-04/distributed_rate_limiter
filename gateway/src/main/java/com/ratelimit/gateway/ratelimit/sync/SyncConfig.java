@@ -1,5 +1,6 @@
 package com.ratelimit.gateway.ratelimit.sync;
 
+import com.ratelimit.gateway.redis.RedisBreaker;
 import com.ratelimit.gateway.redis.RedisConnector;
 import java.util.UUID;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
@@ -13,8 +14,8 @@ public class SyncConfig {
 
     /** The id is new at every start; an earlier run of this gateway drops out like any other node. */
     @Bean(initMethod = "start", destroyMethod = "close")
-    NodeRegistry nodeRegistry(RedisConnector redis, ClusterProperties properties) {
+    NodeRegistry nodeRegistry(RedisConnector redis, ClusterProperties properties, RedisBreaker breaker) {
         return new NodeRegistry(redis::connection, UUID.randomUUID().toString(),
-                properties.heartbeatInterval(), properties.nodeTimeout());
+                properties.heartbeatInterval(), properties.nodeTimeout(), breaker);
     }
 }

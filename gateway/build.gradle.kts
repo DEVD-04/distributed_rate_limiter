@@ -15,6 +15,9 @@ dependencies {
     // Redis client for STRICT mode (version managed by the Spring Boot BOM).
     implementation("io.lettuce:lettuce-core")
 
+    // Circuit breaker around Redis calls (only this module of Resilience4j; not managed by the Spring Boot BOM).
+    implementation("io.github.resilience4j:resilience4j-circuitbreaker:2.3.0")
+
     // Real Redis in tests, started in Docker.
     testImplementation("org.testcontainers:junit-jupiter")
 }

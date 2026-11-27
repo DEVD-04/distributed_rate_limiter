@@ -10,6 +10,7 @@ import com.ratelimit.gateway.ratelimit.TestRules;
 import com.ratelimit.gateway.ratelimit.api.Decision;
 import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.ratelimit.api.Reason;
+import com.ratelimit.gateway.redis.RedisSkippedException;
 import com.ratelimit.rules.Rule;
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -439,6 +440,27 @@ class LocalSyncLimiterTests {
         limiter.acquire(RULE, "alice", 1);
         // the failed call may have reached the bucket: sending the 9 again could count them twice
         assertThat(lastCall().returned()).isZero();
+    }
+
+    @Test
+    void tokensOfACallThatWasNeverMadeGoWithTheNextOne() {
+        var limiter = limiter(10);
+        limiter.acquire(RULE, "alice", 1);
+        clock.advanceMillis(2_000);
+        shared.failure = new RedisSkippedException(); // the circuit breaker is open
+
+        assertThat(limiter.acquire(RULE, "alice", 1)).isEqualTo(FALLBACK_ANSWER);
+        assertThat(limiter.acquire(RULE, "alice", 1)).isEqualTo(FALLBACK_ANSWER);
+        assertThat(lastCall().returned()).isEqualTo(9);
+
+        shared.failure = null;
+        limiter.acquire(RULE, "alice", 1);
+        assertThat(lastCall().returned()).as("never sent, so still to be given back").isEqualTo(9);
+        // and once only
+        clock.advance(Duration.ofMinutes(1));
+        long held = lastCall().want();
+        limiter.acquire(RULE, "alice", 1);
+        assertThat(lastCall().returned()).isEqualTo(held - 1);
     }
 
     @Test

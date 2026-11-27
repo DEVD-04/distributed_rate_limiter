@@ -43,6 +43,11 @@ public class RedisConfig {
         return client;
     }
 
+    @Bean
+    RedisBreaker redisBreaker(RedisBreakerProperties properties) {
+        return new RedisBreaker(properties);
+    }
+
     @Bean(destroyMethod = "close")
     RedisConnector redisConnector(RedisClient client, RedisProperties properties) {
         return new RedisConnector(client, properties.commandTimeout(), RECONNECT_INTERVAL);
