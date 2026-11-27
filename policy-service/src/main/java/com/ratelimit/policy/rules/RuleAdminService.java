@@ -72,7 +72,7 @@ public class RuleAdminService {
         RuleSet.of(1, List.of(rule)); // parses the pattern, even for a rule saved as inactive
         if (rule.mode() == Mode.LOCAL_SYNC && !Rule.servableInMemory(rule.algorithm())) {
             throw new IllegalArgumentException("mode LOCAL_SYNC is not available for " + rule.algorithm()
-                    + " yet (token bucket only); use mode STRICT");
+                    + " (token bucket only); use mode STRICT");
         }
         return rule;
     }

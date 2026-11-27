@@ -58,7 +58,7 @@ public class RateLimiterRouter implements RateLimiter {
                         + ", which needs Redis: set gateway.redis.url");
             } else {
                 problems.add("rule '" + rule.name() + "': mode LOCAL_SYNC is not available for " + rule.algorithm()
-                        + " yet (token bucket only); use mode STRICT");
+                        + " (token bucket only); use mode STRICT");
             }
         }
         return problems;

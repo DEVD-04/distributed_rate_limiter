@@ -15,7 +15,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
-| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-5 of 7 done (`LOCAL_SYNC` token bucket rules now share one limit across gateways) |
+| **4 LOCAL_SYNC** | Token leasing, gateway count, refills and expiry; bound and skew tests | **Done**, without `LOCAL_SYNC` for the leaky bucket, which was skipped (545 tests; live 3-gateway proof, results below) |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
@@ -138,7 +138,7 @@ curl -H "X-Admin-Token: $POLICY_ADMIN_TOKEN" -H 'Content-Type: application/json'
 A change is applied in one transaction: it locks the configuration, writes the row, builds the complete active
 rule set with the same code a gateway uses, and only then raises the version. Errors: 400 invalid (with the
 reason; unknown fields and parameters are rejected), 404 unknown id, 409 another active rule has the same scope.
-`LOCAL_SYNC` is accepted only for the token bucket (the leaky bucket is the next step).
+`LOCAL_SYNC` is accepted only for the token bucket.
 
 #### Publishing to Redis
 
@@ -301,6 +301,14 @@ subject are escaped), and every key has a TTL.
   timeout the call gives up first (it reconnects after 1 s), but with a 5 s timeout a test saw it run twice and credit
   5 returned tokens as 10, which would let the cluster exceed the limit. The script therefore marks each return with an
   id unique to the call (a key that lives 60 s). Borrowing twice needs no guard: the first grant is simply lost.
+- **The `LOCAL_SYNC` limit guarantee is kept as designed, and is narrower than it sounds** (agreed before Phase 4).
+  Counted from when the shared bucket was full, the cluster never admits more than `capacity + refill × time`. In a
+  *later* window a burst can reach `capacity + tokens currently borrowed and unspent`, because the shared bucket can
+  refill while nodes still hold tokens. Rules that need an exact limit should use `STRICT`.
+- **If Redis is unreachable, a `LOCAL_SYNC` node** spends what it has borrowed while that is still valid, then limits
+  with its own in-memory bucket (not fail-open; agreed), until Phase 5's `failure_mode`.
+- **`LOCAL_SYNC` for the leaky bucket (design 6.3) is not built**, by choice. The design's version, each node releasing
+  at 1/N of the rate, is only approximate. The policy service and the gateway refuse such a rule; use `STRICT`.
 - **Request guard:** non-canonical paths (`..`, `//`, `%2e`, `%2f`, `;` …) get 400 so the path rules match is
   the path that is forwarded. TRACE / CONNECT get 405.
 - **Passive health:** connection errors, timeouts and 502/503/504 count against an instance; a plain 500 does not.
@@ -336,18 +344,70 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
 - **Warm gateways under that load:** p50 5.6 ms / p99 10.0 ms end to end (including the mock service), and 0 of 5,704
   requests unchecked.
 - **Cold gateways are not exact** (see the limitation below).
+
+#### `LOCAL_SYNC` against `STRICT` (Phase 4)
+
+3 gateway processes with default settings, each request sent to one chosen at random, 300 requests/s unless stated,
+after 40 s of warm-up. Each request passes an IP rule and a user rule, both in the mode being measured. Redis calls
+are Redis's own `EVALSHA` count, less the gateways' heartbeats. Latency is end to end, including the mock service.
+
+**Generous limits** (nothing refused), 6,000 requests per cell, two runs with the modes in opposite order:
+
+| Users sharing the traffic | `STRICT` calls per request | `LOCAL_SYNC` calls per request | p50 ms `STRICT` / `LOCAL_SYNC` | p99 ms `STRICT` / `LOCAL_SYNC` |
+|---|---|---|---|---|
+| 1 | 2.00 | **0.028** | 3.4–4.6 / 1.6–1.8 | 5.7–9.2 / 2.5–2.8 |
+| 10 (30 requests/s each) | 2.00 | **0.13** | 3.6–3.8 / 1.5–1.7 | 5.6–6.2 / 2.8–3.0 |
+| 300 (1 request/s each) | 2.00 | **0.97** | 3.3–3.7 / 2.5–3.6 | 5.6–5.8 / 3.9–12.0 |
+
+With 300 rarely seen users the user rule saves almost nothing (about one call per request); the saving left is the
+IP rule, whose one key is busy. `LOCAL_SYNC` pays off for keys that are busy on each node.
+
+**One user asking for 300/s for 20 s** (far over the limit); allowance = capacity + refill × time:
+
+| Capacity, refill | Mode, gateways used | Admitted / allowance | Redis calls (6,000 requests) |
+|---|---|---|---|
+| 100, 50/s | `STRICT`, 3 | 1,099 / 1,100 | 12,000 |
+| 100, 50/s | `LOCAL_SYNC`, 3 | 1,099 / 1,100 | 2,685 |
+| 100, 50/s | `LOCAL_SYNC`, only 1 of the 3 | 1,099 / 1,100 | 1,028 |
+| 1,000, 200/s | `STRICT`, 3 | 4,999 / 5,000 | 11,999 |
+| 1,000, 200/s | `LOCAL_SYNC`, 3 | 4,999 / 5,000 | 2,649 |
+| 1,000, 200/s | `LOCAL_SYNC`, only 1 of the 3 | 4,998 / 4,999 | 2,099 |
+
+- Under steady demand the limit held and about one request's worth of allowance went unused, also with all traffic on
+  one node. Allowance stranded when a key's traffic stops or moves was not measured.
+- Over the limit, `LOCAL_SYNC` still made far fewer calls than `STRICT`, but with the small bucket on 3 nodes it made
+  **2.4 calls per admitted request**: each node asks again as soon as one token could be there.
+- **Practically no refill, capacity 600, 3,000 requests:** exactly **600** admitted in all 12 runs (`STRICT`,
+  `LOCAL_SYNC` over 3 gateways and over 1).
+- **Bursts** (capacity 200, refill 200/s: 150 requests/s for 5 s, 1 s of quiet, 800 requests at once; two runs of four
+  bursts per mode). In the 6 `LOCAL_SYNC` bursts with no failed lease call in the logs, 239–290 were admitted, 14–52
+  above capacity plus refill during the burst, as expected from tokens nodes were already holding. In the other 2, lease calls
+  failed, affected nodes fell back to a full bucket of their own, and 383 and 431 were admitted (128 and 157 above).
+  `STRICT` was worse, see the first limitation below.
+- **Redis stopped, 3 gateways, capacity 100, practically no refill:** with `LOCAL_SYNC`, 324 of 1,500 requests were
+  admitted during the outage (a fallback bucket of 100 on each node, plus 24, which fits tokens borrowed before it);
+  with `STRICT`, all 1,500. After Redis came back empty, each mode admitted exactly 100 again.
+- The design asks for `LOCAL_SYNC` gateway overhead under 3 ms at p99. These runs were at 300 requests/s, so that is
+  **not shown for the design's 2k–5k requests/s** (Phase 7).
 - Measurement note: on Windows a sleeping thread wakes on a ~15 ms timer tick, so a load generator that sleeps between
   calls inflates latency by that much. The benchmark spins instead.
 
 ## Known limitations
 
-- **A freshly started gateway under immediate load lets some requests through unchecked, even with Redis healthy.**
-  While the JVM warms up, Redis calls can exceed the 15 ms command timeout, and a failed call is let through.
-  Measured on the laptop at 300 requests/s over three just-started gateways: in one run 172 of 1,200 requests in
-  the first 4 s were unchecked (p99 959 ms); in another, with the load applied steadily, 18 of about 1,500 in the
-  first 5 s; after that, none. So `STRICT` is exact only once warm. Phase 5's `LOCAL_FALLBACK` would keep limiting
-  such requests locally; warming a node before it takes traffic, or a longer timeout, would reduce them. A
-  `LOCAL_SYNC` request whose call fails is not let through unchecked: the node limits it by itself.
+- **`STRICT` requests can pass unchecked even with Redis healthy: on a freshly started gateway, and in a sudden
+  burst on a warm one.** A Redis call that exceeds the 15 ms command timeout fails, and a failed `STRICT` call is let
+  through. So `STRICT` is exact only while every call answers in time.
+  - *Bursts:* with 800 requests at once on 3 warm gateways (capacity 200, refill 200/s), 261–693 of them passed
+    unchecked in the four bursts where this was counted, and 516–749 were admitted. The ones Redis did check stayed
+    within the limit (56–255).
+  - *Cold start:* calls are slow while the JVM warms up. At 300 requests/s over three just-started gateways, one run
+    had 172 of 1,200 requests unchecked in the first 4 s (p99 959 ms); another, with the load applied steadily, had
+    18 of about 1,500 in the first 5 s, and none after that at that rate.
+  - Phase 5's `LOCAL_FALLBACK` would keep limiting such requests locally; warming a node before it takes traffic, or
+    a longer timeout, would reduce them. A `LOCAL_SYNC` request whose call fails is not let through unchecked: the node
+    limits it by itself. But that fallback bucket starts **full**, so a burst can still get up to one extra capacity
+    from each affected node (measured above). The design's `LOCAL_FALLBACK`, giving each node 1/N of the limit,
+    would shrink this.
 - While gateways are switching to a new rule (a few milliseconds apart in the measured runs), one may still apply
   the old parameters to the same Redis bucket another is already treating with the new ones.
 - The admin API has no TLS and one shared token, so changes cannot be attributed to a person. Keep it off
@@ -357,10 +417,14 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
 - **If Redis is unreachable, a `STRICT` request is let through** (all three algorithms) and an error is logged (at most every 10 s), with decision reason
   `LIMITER_UNAVAILABLE`. This is a stop-gap: per-rule `failure_mode` (FAIL_OPEN / FAIL_CLOSED / LOCAL_FALLBACK) and the
   circuit breaker arrive in Phase 5. `failure_mode` is validated and stored but nothing acts on it yet.
-- **`LOCAL_SYNC` is not exact.** A burst can reach the capacity plus the tokens nodes hold (see below), and it can
+- **`LOCAL_SYNC` is not exact.** A burst can reach the capacity plus the tokens nodes hold (see "Decisions"), and it can
   refuse while another node holds unspent tokens. Tokens a node borrowed for a key it never hears from again are lost
   until the shared bucket refills; so are those held by a node that shuts down. With a small limit a node's share is a
-  few tokens, so it saves few Redis calls; it is meant for high-volume limits.
+  few tokens, so it saves few Redis calls; the same goes for keys each node rarely sees (measured above). It is meant
+  for busy keys with high limits.
+- A key held far over a limit that refills quickly makes each node ask Redis up to about once per refilled token.
+  A minimum wait before asking again would cut those calls, at the price of admitting refilled tokens later; to be
+  decided with load tests (Phase 7).
 - **While Redis is unreachable, `LOCAL_SYNC` rules are limited by each node alone:** after what it had borrowed, each
   starts from a full in-memory bucket, so N nodes can admit about N × the limit on top of what was lent.
 - Sliding-window and leaky-bucket rules need Redis (checked at startup). Their `cost` must be 1.
@@ -374,20 +438,10 @@ All on one Windows laptop with Redis in Docker Desktop's VM, so the numbers are 
 - Real Tomcat answers TRACE with an empty 405 before the guard filter sees it; the guard's JSON 405 is covered by MockMvc tests only.
 - No `docker-compose.yml` yet; it arrives with the later phases (Postgres, policy service, Prometheus, Grafana).
 
-## Next: the rest of Phase 4 (LOCAL_SYNC)
+## Next: Phase 5 (resilience)
 
-Token leasing for `LOCAL_SYNC` token bucket rules is in use. Left: `LOCAL_SYNC` for the leaky bucket (approximate: each
-node releases at 1/N of the rate), and a proof with three gateway processes under load, including all of one key's
-traffic on one node, measuring unused allowance, Redis calls and latency against `STRICT`.
-
-Steps: (1) borrowing script, (2) node count, (3) local tokens, (4) refills and expiry, (5) wiring into the gateway,
-(6) leaky bucket, (7) proof.
-
-Agreed before starting:
-
-- **The limit guarantee is kept as designed, and is narrower than it sounds.** Counted from when the shared bucket was
-  full, the cluster never admits more than `capacity + refill × time`. In a *later* window a burst can reach
-  `capacity + tokens currently borrowed and unspent`, because the shared bucket can refill while nodes still hold
-  tokens. Rules that need an exact limit should use `STRICT`.
-- **If Redis is unreachable,** a node spends what it has borrowed while that is still valid, then limits with its own
-  in-memory bucket (not fail-open), until Phase 5's `failure_mode`.
+A circuit breaker around Redis calls (design: opens at 50% failures over 20 calls, for 5 s, then 3 probes), each
+rule's `failure_mode` acted on (`FAIL_OPEN`, `FAIL_CLOSED` with 503, or `LOCAL_FALLBACK`: a local bucket with 1/N of
+the capacity and refill, N being the last known node count), no leasing or heartbeats while the breaker is open, and a
+test that stops Redis under load. `LOCAL_FALLBACK` bears on the two largest gaps measured so far: `STRICT` requests
+passing unchecked in bursts and cold starts, and `LOCAL_SYNC`'s full-size fallback buckets.
