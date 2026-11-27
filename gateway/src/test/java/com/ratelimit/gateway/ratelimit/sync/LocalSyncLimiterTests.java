@@ -3,6 +3,7 @@ package com.ratelimit.gateway.ratelimit.sync;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import com.ratelimit.gateway.ratelimit.FakeNanoClock;
 import com.ratelimit.gateway.ratelimit.TestRules;
@@ -11,9 +12,13 @@ import com.ratelimit.gateway.ratelimit.api.RateLimiter;
 import com.ratelimit.gateway.ratelimit.api.Reason;
 import com.ratelimit.rules.Rule;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -33,8 +38,34 @@ class LocalSyncLimiterTests {
         return FALLBACK_ANSWER;
     };
 
+    private static final Duration HORIZON = Duration.ofSeconds(1);
+
+    /** Background refills wait here until a test runs them. */
+    private final Deque<Runnable> refills = new ArrayDeque<>();
+
+    /** A limiter that never refills in the background. */
     private LocalSyncLimiter limiter(long batch) {
-        return new LocalSyncLimiter(shared, nodes::get, fallback, batch, Duration.ofSeconds(1), 1_000, clock);
+        return build(shared, batch, 0, refills::add);
+    }
+
+    /** A limiter that refills below 30% of a batch, as in normal use. */
+    private LocalSyncLimiter refilling(long batch) {
+        return build(shared, batch, 0.3, refills::add);
+    }
+
+    private LocalSyncLimiter build(LeaseSource source, long batch, double refillBelow, Executor background) {
+        return new LocalSyncLimiter(source, nodes::get, fallback, new LeaseSettings(batch, HORIZON, refillBelow),
+                1_000, background, clock);
+    }
+
+    private void runRefills() {
+        while (!refills.isEmpty()) {
+            refills.poll().run();
+        }
+    }
+
+    private FakeSharedBucket.Call lastCall() {
+        return shared.calls.get(shared.calls.size() - 1);
     }
 
     /** @return how many of {@code requests} requests were allowed */
@@ -72,10 +103,11 @@ class LocalSyncLimiterTests {
     }
 
     @Test
-    void aHundredRequestsInBatchesOfTwentyMakeFiveCalls() {
+    void batchesGrowWhenManyRequestsComeAtOnce() {
         assertThat(allowed(limiter(20), RULE, "alice", 100)).isEqualTo(100);
 
-        assertThat(shared.calls).hasSize(5);
+        // each call asks for as much as has recently been wanted; the clock stands still, so nothing fades
+        assertThat(shared.calls).extracting(FakeSharedBucket.Call::want).containsExactly(20L, 21L, 42L, 84L);
     }
 
     @Test
@@ -217,12 +249,13 @@ class LocalSyncLimiterTests {
     @Test
     void resetCountsDownToWhenTheSharedBucketWasExpectedToBeFull() {
         var limiter = limiter(10);
-        assertThat(limiter.acquire(RULE, "alice", 1).resetMs()).isEqualTo(20_000);
+        shared.fullMs = 1_500;
+        assertThat(limiter.acquire(RULE, "alice", 1).resetMs()).isEqualTo(1_500);
 
-        clock.advanceMillis(15_000);
-        assertThat(limiter.acquire(RULE, "alice", 1).resetMs()).isEqualTo(5_000);
+        clock.advanceMillis(1_000);
+        assertThat(limiter.acquire(RULE, "alice", 1).resetMs()).isEqualTo(500);
 
-        clock.advanceMillis(15_000);
+        clock.advanceMillis(900);
         assertThat(limiter.acquire(RULE, "alice", 1).resetMs()).isZero();
     }
 
@@ -262,7 +295,8 @@ class LocalSyncLimiterTests {
         finish(threads);
 
         assertThat(decisions).hasSize(20).allMatch(Decision::allowed);
-        assertThat(shared.calls).extracting(FakeSharedBucket.Call::want).containsExactly(5L, 15L);
+        // the second call asks for what has been wanted: all twenty
+        assertThat(shared.calls).extracting(FakeSharedBucket.Call::want).containsExactly(5L, 20L);
     }
 
     @Test
@@ -298,6 +332,7 @@ class LocalSyncLimiterTests {
 
         shared.failure = null;
         shared.gate = null;
+        clock.advance(Duration.ofMinutes(1)); // recent demand has faded, so only waiters could raise the batch
         assertThat(limiter.acquire(RULE, "alice", 1)).isNotEqualTo(FALLBACK_ANSWER);
         assertThat(shared.calls).hasSize(2);
         assertThat(shared.calls.get(1).want()).as("nobody is still counted as waiting").isEqualTo(5);
@@ -318,7 +353,7 @@ class LocalSyncLimiterTests {
             }
             return shared.lease(ruleId, subject, params, want, need, returned, n);
         };
-        var limiter = new LocalSyncLimiter(breaksOnce, nodes::get, fallback, 5, Duration.ofSeconds(1), 1_000, clock);
+        var limiter = build(breaksOnce, 5, 0, refills::add);
         var decisions = new ArrayList<Decision>();
 
         List<Thread> threads = startTogether(limiter, 5, decisions);
@@ -361,8 +396,230 @@ class LocalSyncLimiterTests {
 
     @Test
     void impossibleSettingsAreRefused() {
-        assertThatThrownBy(() -> limiter(0)).hasMessageContaining("batch size");
-        assertThatThrownBy(() -> new LocalSyncLimiter(shared, nodes::get, fallback, 1, Duration.ZERO, 10, clock))
-                .hasMessageContaining("recheck");
+        assertThatThrownBy(() -> new LeaseSettings(0, HORIZON, 0.3)).hasMessageContaining("minimum batch");
+        assertThatThrownBy(() -> new LeaseSettings(1, Duration.ZERO, 0.3)).hasMessageContaining("horizon");
+        assertThatThrownBy(() -> new LeaseSettings(1, Duration.ofHours(2), 0.3)).hasMessageContaining("horizon");
+        assertThatThrownBy(() -> new LeaseSettings(1, HORIZON, 1)).hasMessageContaining("refill-below");
+        assertThatThrownBy(() -> new LeaseSettings(1, HORIZON, -0.1)).hasMessageContaining("refill-below");
+        assertThatThrownBy(() -> new LeaseSettings(1, HORIZON, Double.NaN)).hasMessageContaining("refill-below");
+    }
+
+    // ---- borrowed tokens expire ----
+
+    @Test
+    void unspentTokensExpireAfterTwoHorizonsAndGoBackWithTheNextCall() {
+        var limiter = limiter(10);
+        limiter.acquire(RULE, "alice", 1);
+
+        clock.advanceMillis(1_999);
+        limiter.acquire(RULE, "alice", 1);
+        assertThat(shared.calls).as("still spendable just before").hasSize(1);
+
+        clock.advanceMillis(1);
+        assertThat(limiter.acquire(RULE, "alice", 1).allowed()).isTrue();
+        assertThat(shared.calls).hasSize(2);
+        assertThat(lastCall().returned()).isEqualTo(8);
+        // 100 = 3 spent + what the node holds (the new grant less 1) + what is left
+        long granted = 100 - 10 + 8 - shared.left(ID, "alice");
+        assertThat(allowed(limiter, RULE, "alice", (int) granted - 1)).isEqualTo(granted - 1);
+        assertThat(shared.calls).as("nothing lost, nothing made").hasSize(2);
+    }
+
+    @Test
+    void theTokensOfAFailedCallAreNeverSentAgain() {
+        var limiter = limiter(10);
+        limiter.acquire(RULE, "alice", 1);
+        clock.advanceMillis(2_000);
+        shared.failure = new IllegalStateException("no reply");
+
+        assertThat(limiter.acquire(RULE, "alice", 1)).isEqualTo(FALLBACK_ANSWER);
+        assertThat(lastCall().returned()).isEqualTo(9);
+
+        shared.failure = null;
+        limiter.acquire(RULE, "alice", 1);
+        // the failed call may have reached the bucket: sending the 9 again could count them twice
+        assertThat(lastCall().returned()).isZero();
+    }
+
+    @Test
+    void expiredTokensCanBeBorrowedStraightBack() {
+        var small = new FakeSharedBucket(10);
+        var limiter = build(small, 10, 0, refills::add);
+        limiter.acquire(RULE, "alice", 1); // the node now holds all that is left
+
+        clock.advanceMillis(3_000);
+
+        assertThat(limiter.acquire(RULE, "alice", 1).allowed()).isTrue();
+        assertThat(small.calls.get(1).returned()).isEqualTo(9);
+    }
+
+    @Test
+    void expiredTokensAreGivenBackEvenWhileTheSharedBucketIsBelievedEmpty() {
+        var small = new FakeSharedBucket(10);
+        var limiter = build(small, 10, 0, refills::add);
+        Rule costly = TestRules.tokenBucket(ID, 100, 1, 4);
+        // holds 2; the third is refused from memory, as the first reply already said there was no more
+        assertThat(allowed(limiter, costly, "alice", 3)).isEqualTo(2);
+        clock.advanceMillis(1_500);
+        limiter.acquire(costly, "alice", 1); // asks again, and is now not to ask before 2.5 s
+        assertThat(small.calls).hasSize(2);
+
+        clock.advanceMillis(500); // the 2 expire, well within that wait
+        limiter.acquire(costly, "alice", 1);
+
+        assertThat(small.calls).hasSize(3);
+        assertThat(small.calls.get(2).returned()).isEqualTo(2);
+        assertThat(small.left(ID, "alice")).isEqualTo(2);
+    }
+
+    @Test
+    void aLateRefillCannotGiveExpiredTokensANewLife() {
+        var limiter = refilling(10);
+        allowed(limiter, RULE, "alice", 8); // 2 left, and a refill is on its way
+        assertThat(refills).hasSize(1);
+        clock.advanceMillis(2_000); // the reply is very late: the 2 have expired meanwhile
+
+        runRefills();
+        long granted = 100 - 10 - shared.left(ID, "alice");
+        limiter.acquire(RULE, "alice", 1);
+        assertThat(shared.calls).as("served from the new batch").hasSize(2);
+
+        clock.advanceMillis(2_000);
+        limiter.acquire(RULE, "alice", 1);
+
+        assertThat(lastCall().returned()).isEqualTo(2 + granted - 1);
+    }
+
+    // ---- batches follow demand ----
+
+    /** One request every {@code gapMs}, with any refill finishing before the next. */
+    private void steadyTraffic(RateLimiter limiter, Rule rule, int requests, long gapMs) {
+        for (int i = 0; i < requests; i++) {
+            assertThat(limiter.acquire(rule, "alice", 1).allowed()).isTrue();
+            runRefills();
+            clock.advanceMillis(gapMs);
+        }
+    }
+
+    @Test
+    void aSteadyKeyBorrowsAboutOneHorizonOfDemandAndBatchesShrinkWhenItSlows() {
+        var big = new FakeSharedBucket(1_000_000);
+        var limiter = build(big, 1, 0.3, refills::add);
+        Rule rule = TestRules.tokenBucket(ID, 1_000_000, 1);
+
+        steadyTraffic(limiter, rule, 1_000, 10); // 100 requests a second for 10 s
+
+        FakeSharedBucket.Call busy = big.calls.get(big.calls.size() - 1);
+        assertThat(busy.want()).isBetween(95L, 105L);
+        assertThat(big.calls).as("1,000 requests").hasSizeLessThan(30);
+
+        clock.advance(Duration.ofSeconds(30));
+        limiter.acquire(rule, "alice", 1);
+        FakeSharedBucket.Call quiet = big.calls.get(big.calls.size() - 1);
+        assertThat(quiet.want()).isEqualTo(1);
+        assertThat(quiet.returned()).as("what the busy spell left over").isPositive();
+    }
+
+    @Test
+    void aQuietKeyCostsOneCallPerRequestAndHoardsNothing() {
+        var limiter = refilling(1);
+
+        steadyTraffic(limiter, RULE, 5, 10_000);
+
+        assertThat(shared.calls).hasSize(5).allMatch(call -> call.want() == 1 && call.returned() == 0);
+        assertThat(shared.left(ID, "alice")).isEqualTo(95);
+    }
+
+    // ---- refilling in the background ----
+
+    @Test
+    void belowThirtyPercentOneRefillStartsAndNoRequestWaitsForIt() {
+        var limiter = refilling(10);
+
+        allowed(limiter, RULE, "alice", 7);
+        assertThat(refills).as("3 of 10 left is not below 30%").isEmpty();
+
+        assertThat(allowed(limiter, RULE, "alice", 3)).isEqualTo(3);
+        assertThat(refills).as("one, however many requests follow").hasSize(1);
+        assertThat(shared.calls).as("it has not even run yet").hasSize(1);
+
+        runRefills();
+        assertThat(lastCall().need()).as("nobody is waiting").isZero();
+        assertThat(allowed(limiter, RULE, "alice", 5)).isEqualTo(5);
+        assertThat(shared.calls).hasSize(2);
+    }
+
+    @Test
+    void aBusyKeyStopsWaitingOnceRefillsKeepUp() {
+        var big = new FakeSharedBucket(1_000_000);
+        var limiter = build(big, 1, 0.3, refills::add);
+        Rule rule = TestRules.tokenBucket(ID, 1_000_000, 1);
+        int waited = 0;
+
+        for (int i = 0; i < 500; i++) {
+            int before = big.calls.size();
+            assertThat(limiter.acquire(rule, "alice", 1).allowed()).isTrue();
+            waited += big.calls.size() - before; // a call made inside acquire() is one the request waited for
+            runRefills();
+            clock.advanceMillis(10);
+        }
+
+        assertThat(waited).as("only while warming up").isLessThanOrEqualTo(2);
+    }
+
+    @Test
+    void noRefillStartsWhileTheSharedBucketIsEmpty() {
+        var small = new FakeSharedBucket(10);
+        var limiter = build(small, 10, 0.3, refills::add);
+
+        allowed(limiter, RULE, "alice", 10);
+
+        assertThat(refills).isEmpty();
+    }
+
+    @Test
+    void aFailedRefillKeepsTheTokensInHandAndPausesBeforeTryingAgain() {
+        var big = new FakeSharedBucket(1_000);
+        var limiter = build(big, 100, 0.3, refills::add);
+        Rule rule = TestRules.tokenBucket(ID, 1_000, 1);
+        allowed(limiter, rule, "alice", 71); // 29 left: a refill starts
+        big.failure = new IllegalStateException("redis is away");
+        runRefills();
+
+        assertThat(allowed(limiter, rule, "alice", 10)).isEqualTo(10);
+        assertThat(refills).as("not again at once").isEmpty();
+        assertThat(fallbackCalls).hasValue(0);
+
+        clock.advanceMillis(1_000);
+        limiter.acquire(rule, "alice", 1);
+        assertThat(refills).hasSize(1);
+    }
+
+    @Test
+    void requestsThatRunOutDuringARefillWaitForIt() throws InterruptedException {
+        var limiter = build(shared, 10, 0.3, task -> Thread.ofPlatform().start(task));
+        limiter.acquire(RULE, "alice", 1);
+        shared.gate = new CountDownLatch(1); // holds the refill
+        assertThat(allowed(limiter, RULE, "alice", 9)).isEqualTo(9);
+        await().atMost(Duration.ofSeconds(5)).until(() -> shared.calls.size() == 2);
+
+        var decisions = new ArrayList<Decision>();
+        List<Thread> threads = startTogether(limiter, 5, decisions);
+        assertThat(shared.calls).as("they join the refill").hasSize(2);
+        shared.gate.countDown();
+        finish(threads);
+
+        assertThat(decisions).hasSize(5).allMatch(Decision::allowed);
+        assertThat(shared.calls).hasSize(2);
+    }
+
+    @Test
+    void aRefusedRefillTaskLeavesNothingStuck() {
+        var limiter = build(shared, 10, 0.3, task -> {
+            throw new RejectedExecutionException("shutting down");
+        });
+
+        assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> assertThat(allowed(limiter, RULE, "alice", 30)).isEqualTo(30));
     }
 }

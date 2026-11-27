@@ -49,11 +49,18 @@ class LocalSyncRedisTests {
         client.shutdown();
     }
 
+    private final AtomicLong returned = new AtomicLong();
+
     private List<LocalSyncLimiter> nodes(int count, long batch) {
+        return nodes(count, new LeaseSettings(batch, Duration.ofSeconds(1), 0.3));
+    }
+
+    private List<LocalSyncLimiter> nodes(int count, LeaseSettings settings) {
         var redis = new TokenLeaseClient(() -> connection);
-        LeaseSource counted = (ruleId, subject, params, want, need, returned, n) -> {
+        LeaseSource counted = (ruleId, subject, params, want, need, back, n) -> {
             calls.incrementAndGet();
-            return redis.lease(ruleId, subject, params, want, need, returned, n);
+            returned.addAndGet(back);
+            return redis.lease(ruleId, subject, params, want, need, back, n);
         };
         List<LocalSyncLimiter> nodes = new ArrayList<>();
         for (int i = 0; i < count; i++) {
@@ -61,7 +68,7 @@ class LocalSyncRedisTests {
             nodes.add(new LocalSyncLimiter(counted, () -> count, (rule, key, cost) -> {
                 failures.incrementAndGet();
                 return fallback.acquire(rule, key, cost);
-            }, batch, Duration.ofSeconds(1), 1_000, System::nanoTime));
+            }, settings, 1_000, task -> Thread.ofVirtual().start(task), System::nanoTime));
         }
         return nodes;
     }
@@ -150,6 +157,39 @@ class LocalSyncRedisTests {
     }
 
     @Test
+    void tokensThatExpireAndComeBackAreNeitherLostNorCountedTwice() throws Exception {
+        // tokens live 100 ms, and each node is left alone long enough for some to expire between its turns
+        List<LocalSyncLimiter> nodes = nodes(3, new LeaseSettings(20, Duration.ofMillis(50), 0.3));
+        Rule rule = TestRules.tokenBucket(5, 200, 0.000001);
+        String who = "s-" + UUID.randomUUID();
+
+        long allowed = 0;
+        for (int turn = 0; turn < 30; turn++) {
+            if (nodes.get(turn % 3).acquire(rule, who, 1).allowed()) {
+                allowed++;
+            }
+            Thread.sleep(60);
+        }
+        assertThat(returned.get()).as("tokens really did expire and come back").isPositive();
+
+        int quietRounds = 0;
+        while (quietRounds < 3) { // until three rounds in a row, each after expiry, yield nothing
+            long got = 0;
+            for (LocalSyncLimiter node : nodes) {
+                while (node.acquire(rule, who, 1).allowed()) {
+                    got++;
+                }
+            }
+            allowed += got;
+            quietRounds = got == 0 ? quietRounds + 1 : 0;
+            Thread.sleep(150);
+        }
+
+        assertThat(failures).hasValue(0);
+        assertThat(allowed).isEqualTo(200);
+    }
+
+    @Test
     void borrowingInBatchesNeedsFarFewerCallsThanRequests() {
         LocalSyncLimiter node = nodes(1, 100).get(0);
         Rule rule = TestRules.tokenBucket(4, 10_000, 1);
@@ -159,6 +199,7 @@ class LocalSyncRedisTests {
             assertThat(node.acquire(rule, who, 1).allowed()).isTrue();
         }
 
-        assertThat(calls).hasValue(20);
+        assertThat(calls.get()).isLessThanOrEqualTo(25);
+        System.out.println("2,000 requests took " + calls.get() + " lease calls");
     }
 }

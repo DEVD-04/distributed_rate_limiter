@@ -15,7 +15,7 @@ records what is built, how to run it, and where the implementation departs from 
 | **1 Foundation** | Gateway skeleton, mock services, RS256 + API-key auth, routing, in-memory token bucket behind `RateLimiter`, rule matching, 429 contract | **Done** |
 | **2 STRICT mode** | Lettuce, Lua scripts for all three algorithms, exact limits across nodes, router, atomicity proof | **Done** (335 tests; live 3-node run passed) |
 | **3 Rules** | Shared `rules-core`, PostgreSQL schema, admin API, publishing to Redis, gateways loading and following rules and API keys | **Done** (455 tests; live 3-gateway proof with an outage passed) |
-| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-3 of 7 done (borrowing script, node count, local tokens; no rule uses them yet) |
+| 4 LOCAL_SYNC | Token leasing, membership, bound and skew tests | In progress: steps 1-4 of 7 done (borrowing script, node count, local tokens, refills and expiry; no rule uses them yet) |
 | 5 Resilience | Circuit breaker, failure modes, fallback limiter | Not started |
 | 6 Observability | Micrometer, `/metrics`, Prometheus, Grafana | Not started |
 | 7 Hardening | Load tests, tuning, docs | Not started |
@@ -277,9 +277,21 @@ subject are escaped), and every key has a TTL.
   coming back, could be refused although the shared bucket has tokens). One call per (rule, key) is in progress at a
   time; requests arriving meanwhile share it, and the next call asks for enough for those still unserved. When a reply
   says the shared bucket cannot cover another request, such requests are refused from memory until the expected time,
-  or for the recheck interval if sooner (other nodes may give tokens back). If a call fails, its waiters use the
-  per-node fallback limiter. Each (rule, key) is guarded by its own lock, never held during a call (the design suggests
-  a CAS counter), and tokens are whole numbers because a node never refills by itself.
+  or for one lease horizon if sooner (other nodes may give tokens back); a node holding expired tokens asks at once,
+  since the call gives them back. If a call fails, its waiters use the per-node fallback limiter. Each (rule, key) is
+  guarded by its own lock, never held during a call (the design suggests a CAS counter), and tokens are whole numbers
+  because a node never refills by itself.
+- **Batches, refills and expiry (`LOCAL_SYNC`):** a batch is the tokens expected over one lease horizon (each request
+  adds its cost to a total that fades with that time constant), at least the minimum batch. Below the refill fraction
+  (design: 30%) the next batch is fetched in the background, but only if more than the current request is expected;
+  otherwise a rarely used key would cost two calls per request and hold tokens it never spends. Unspent tokens may be
+  spent for two horizons after the latest grant, and are given back with the key's next call from that node (as
+  designed: if there is none, they are lost until the bucket refills). A late reply cannot renew expired tokens.
+- **A returned token is counted once, even if the call runs twice.** The Redis client library sends a call again if the
+  connection breaks before the reply and returns while the call is still pending. With the default 15 ms command
+  timeout the call gives up first (it reconnects after 1 s), but with a 5 s timeout a test saw it run twice and credit
+  5 returned tokens as 10, which would let the cluster exceed the limit. The script therefore marks each return with an
+  id unique to the call (a key that lives 60 s). Borrowing twice needs no guard: the first grant is simply lost.
 - **Request guard:** non-canonical paths (`..`, `//`, `%2e`, `%2f`, `;` …) get 400 so the path rules match is
   the path that is forwarded. TRACE / CONNECT get 405.
 - **Passive health:** connection errors, timeouts and 502/503/504 count against an instance; a plain 500 does not.

@@ -6,6 +6,7 @@ import com.ratelimit.gateway.redis.RedisKeys;
 import com.ratelimit.rules.TokenBucketParams;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 
 /**
@@ -18,10 +19,19 @@ import java.util.function.Supplier;
  */
 public class TokenLeaseClient implements LeaseSource {
 
+    /** Far longer than a call can stay pending, which is what bounds how late it could be sent again. */
+    private static final long RETURN_MARKER_TTL_MS = 60_000;
+
     /**
      * Refills the shared bucket, takes back unused tokens and lends out whole tokens.
-     * KEYS[1] bucket hash; ARGV: capacity, refill_per_sec, want, need, returned, node_count, ttl_ms.
+     * KEYS[1] bucket hash, KEYS[2] marker of this call's return;
+     * ARGV: capacity, refill_per_sec, want, need, returned, node_count, ttl_ms, marker_ttl_ms.
      * Returns {granted, whole tokens left, ms until the bucket can cover another such need, ms until full}.
+     *
+     * <p>The client library sends a call again if the connection breaks before the reply and comes back
+     * while the call is still pending, even though Redis may already have run it. Running the borrowing
+     * twice only loses the first grant. Crediting a return twice would create tokens, so a return is
+     * credited only if its marker, unique to the call, is not there yet.
      *
      * <p>A node normally gets at most its fair share, ceil(whole tokens / nodes), so one node cannot empty the
      * bucket in a single call. {@code need} is what a waiting request is short of. If the bucket holds that
@@ -39,6 +49,9 @@ public class TokenLeaseClient implements LeaseSource {
             local d = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
             local tokens, ts = tonumber(d[1]), tonumber(d[2])
             if tokens == nil then tokens = cap; ts = now end
+            if returned > 0 and not redis.call('SET', KEYS[2], 1, 'NX', 'PX', tonumber(ARGV[8])) then
+              returned = 0 -- this very call already ran, and credited it then
+            end
             -- capped after adding what came back, so a return can never push the bucket above capacity
             tokens = math.min(cap, tokens + math.max(0, now - ts) * rate / 1000 + returned)
             -- 1e-9 absorbs floating-point rounding, as in the STRICT token bucket
@@ -78,15 +91,18 @@ public class TokenLeaseClient implements LeaseSource {
         if (nodeCount < 1) {
             throw new IllegalArgumentException("node count must be at least 1, was " + nodeCount);
         }
+        var random = ThreadLocalRandom.current();
+        String callId = Long.toHexString(random.nextLong()) + Long.toHexString(random.nextLong());
         List<Long> result = LEASE.run(connection.get(),
-                List.of(RedisKeys.of(ruleId, subject, "tb")),
+                List.of(RedisKeys.of(ruleId, subject, "tb"), RedisKeys.of(ruleId, subject, "ret:" + callId)),
                 Long.toString(params.capacity()),
                 Double.toString(params.refillPerSec()),
                 Long.toString(Math.max(want, need)),
                 Long.toString(need),
                 Long.toString(returned),
                 Integer.toString(nodeCount),
-                Long.toString(StrictRedisLimiter.keyTtlMillis(params)));
+                Long.toString(StrictRedisLimiter.keyTtlMillis(params)),
+                Long.toString(RETURN_MARKER_TTL_MS));
         return new Lease(result.get(0), result.get(1), result.get(2), result.get(3));
     }
 }
